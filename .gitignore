@@ -1,0 +1,15 @@
+build/
+refs/
+logs/
+*.o
+*.elf
+*.log
+*.tar.gz
+build/
+*.o
+*.elf
+*.log
+*.bak*
+
+# Local PS2DEV environment
+.ps2dev-env

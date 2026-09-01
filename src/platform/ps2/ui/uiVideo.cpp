@@ -1,0 +1,628 @@
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <kernel.h>
+#include <libpad.h>
+#include "types.h"
+#include "font.h"
+#include "poly.h"
+#include "uiVideo.h"
+
+extern "C" {
+#include "gskit_backend.h"
+}
+#include "memcard.h"
+#include "uiCover.h"
+#include "mainloop_bgm.h"
+#include "mainloop_smb.h"
+#include "mainloop_safe_frameskip.h"
+#include "audmixbuffer.h"
+#include "embedded_irx.h"   /* HddSupportIsEnabled / HddSupportSetEnabled */
+#include "snppucolor.h"
+
+/* mc0:/SNESticle (defined in mainloop_globals.cpp). */
+extern Char _SramPath[256];
+
+/* ------------------------------------------------------------------ */
+/* Persistence                                                         */
+/* ------------------------------------------------------------------ */
+
+#define VIDEOCFG_MAGIC   0x53564944u   /* 'SVID' */
+#define VIDEOCFG_VERSION 19
+
+typedef struct
+{
+	Uint32 magic;
+	Int32  version;
+	Int32  mode;
+	Int32  offx;
+	Int32  offy;
+	Int32  overscan;
+	Int32  widescreen;
+	Int32  covers;
+	Int32  bgmvol;     /* volume da trilha de menu: 0=off, 1..100 */
+	Int32  bgmrate;    /* frequencia de sintese da trilha (Hz)     */
+	Int32  gamevol;    /* volume do audio do jogo (SNES/NES): 0..100 */
+	Int32  hddenable;  /* suporte ao HD interno (hdd0:): 0=off, 1=on  */
+	Int32  mmceenable; /* suporte a MMCE (mmce0/1): 0=off, 1=on       */
+	Int32  massenable; /* mass/USB (mass0/1): 0=off, 1=on             */
+	Int32  smbenable;  /* historical host slot; now smb: 0=off, 1=on */
+	Int32  mx4sioenable; /* MX4SIO (SD via SIO2): 0=off, 1=on         */
+	Int32  colorprofile; /* SNPPU_COLOR_PROFILE_*                     */
+	Int32  frameskip;    /* recuperacao adaptativa: 0=off, 1=on       */
+	Int32  atabdmenable; /* ATA-Assault HD interno FAT/exFAT: 0/1     */
+} VideoCfgT;
+
+/* v18 added frameskip to the v17 prefix. */
+typedef struct
+{
+	Uint32 magic;
+	Int32  version;
+	Int32  mode;
+	Int32  offx;
+	Int32  offy;
+	Int32  overscan;
+	Int32  widescreen;
+	Int32  covers;
+	Int32  bgmvol;
+	Int32  bgmrate;
+	Int32  gamevol;
+	Int32  hddenable;
+	Int32  mmceenable;
+	Int32  massenable;
+	Int32  smbenable;
+	Int32  mx4sioenable;
+	Int32  colorprofile;
+	Int32  frameskip;
+} VideoCfgV18T;
+
+/* v17 added colorprofile to the v16 prefix. */
+typedef struct
+{
+	Uint32 magic;
+	Int32  version;
+	Int32  mode;
+	Int32  offx;
+	Int32  offy;
+	Int32  overscan;
+	Int32  widescreen;
+	Int32  covers;
+	Int32  bgmvol;
+	Int32  bgmrate;
+	Int32  gamevol;
+	Int32  hddenable;
+	Int32  mmceenable;
+	Int32  massenable;
+	Int32  smbenable;
+	Int32  mx4sioenable;
+	Int32  colorprofile;
+} VideoCfgV17T;
+
+/* v16 is the exact prefix written by v1.0.4 and by the first video-fix
+   test build. Keep it readable so installing this build never resets the
+   user's mode, offsets, audio volumes or storage choices. */
+typedef struct
+{
+	Uint32 magic;
+	Int32  version;
+	Int32  mode;
+	Int32  offx;
+	Int32  offy;
+	Int32  overscan;
+	Int32  widescreen;
+	Int32  covers;
+	Int32  bgmvol;
+	Int32  bgmrate;
+	Int32  gamevol;
+	Int32  hddenable;
+	Int32  mmceenable;
+	Int32  massenable;
+	Int32  hostenable;
+	Int32  mx4sioenable;
+} VideoCfgV16T;
+
+typedef struct
+{
+	Uint32 magic;
+	Int32  version;
+} VideoCfgHeaderT;
+
+static void _VideoCfgPath(char *pOut)
+{
+	strcpy(pOut, _SramPath);
+	strcat(pOut, "/video.cfg");
+}
+
+void VideoSettingsSave(void)
+{
+	VideoCfgT cfg;
+	char      path[300];
+
+	cfg.magic   = VIDEOCFG_MAGIC;
+	cfg.version = VIDEOCFG_VERSION;
+	cfg.mode    = g_GskVideoMode;
+	cfg.offx    = g_GskDispOffX;
+	cfg.offy    = g_GskDispOffY;
+	cfg.overscan   = g_GskOverscan;
+	cfg.widescreen = g_GskWidescreen;
+	cfg.covers     = CoverIsEnabled() ? 1 : 0;
+	cfg.bgmvol     = BgmGetVolume();
+	cfg.bgmrate    = BgmGetRate();
+	cfg.gamevol    = AudMixGameGetVolume();
+	cfg.hddenable  = HddSupportIsEnabled() ? 1 : 0;
+	cfg.mmceenable = MmceSupportIsEnabled() ? 1 : 0;
+	cfg.massenable = MassStorageIsEnabled() ? 1 : 0;
+	cfg.smbenable  = SmbSupportIsEnabled() ? 1 : 0;
+	cfg.mx4sioenable = Mx4sioIsEnabled() ? 1 : 0;
+	cfg.colorprofile = SNPPUColorGetProfile();
+	cfg.frameskip = MainLoopSafeFrameskipIsEnabled() ? 1 : 0;
+	cfg.atabdmenable = AtaBdmAssaultIsEnabled() ? 1 : 0;
+
+	_VideoCfgPath(path);
+	BgmIOBegin();
+	MemCardWriteFile(path, (Uint8 *)&cfg, sizeof(cfg));
+	BgmIOEnd();
+}
+
+void VideoSettingsLoad(void)
+{
+	VideoCfgT cfg;
+	VideoCfgV18T oldcfg18;
+	VideoCfgV17T oldcfg17;
+	VideoCfgV16T oldcfg;
+	VideoCfgHeaderT header;
+	char      path[300];
+	Bool      loaded = FALSE;
+
+	memset(&cfg, 0, sizeof(cfg));
+	_VideoCfgPath(path);
+
+	memset(&header, 0, sizeof(header));
+	if (MemCardReadFile(path, (Uint8 *)&header, sizeof(header)) &&
+	    header.magic == VIDEOCFG_MAGIC)
+	{
+		if (header.version == VIDEOCFG_VERSION)
+		{
+			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+		}
+		else if (header.version == 18)
+		{
+			memset(&oldcfg18, 0, sizeof(oldcfg18));
+			if (MemCardReadFile(path, (Uint8 *)&oldcfg18, sizeof(oldcfg18)))
+			{
+				memcpy(&cfg, &oldcfg18, sizeof(oldcfg18));
+				cfg.version = VIDEOCFG_VERSION;
+				cfg.atabdmenable = 0;
+				loaded = TRUE;
+			}
+		}
+		else if (header.version == 17)
+		{
+			memset(&oldcfg17, 0, sizeof(oldcfg17));
+			if (MemCardReadFile(path, (Uint8 *)&oldcfg17, sizeof(oldcfg17)))
+			{
+				memcpy(&cfg, &oldcfg17, sizeof(oldcfg17));
+				cfg.version = VIDEOCFG_VERSION;
+				cfg.frameskip = 0;
+				cfg.atabdmenable = 0;
+				loaded = TRUE;
+			}
+		}
+		else if (header.version == 16)
+		{
+			memset(&oldcfg, 0, sizeof(oldcfg));
+			if (MemCardReadFile(path, (Uint8 *)&oldcfg, sizeof(oldcfg)))
+			{
+				/* VideoCfgT only appends colorprofile to the v16 prefix. */
+				memcpy(&cfg, &oldcfg, sizeof(oldcfg));
+				cfg.version = VIDEOCFG_VERSION;
+				cfg.colorprofile = SNPPU_COLOR_PROFILE_ORIGINAL;
+				cfg.frameskip = 0;
+				cfg.atabdmenable = 0;
+				loaded = TRUE;
+			}
+		}
+	}
+
+	if (loaded && cfg.magic == VIDEOCFG_MAGIC)
+	{
+		/* v1.0.2 allowed both SIO2 storage hooks to be saved at once.
+		   Prefer MMCE when importing such a legacy config; all new changes
+		   are mutually exclusive in the setters below. */
+		if (cfg.mmceenable == 1 && cfg.mx4sioenable == 1)
+			cfg.mx4sioenable = 0;
+
+		/* Import safety: APA HDD (hdd0:) and ATA-Assault (massN: FAT/exFAT)
+		   both own the ATA hardware and cannot coexist at runtime.  When a
+		   config somehow enables both, prefer the older APA entry so the
+		   user's existing hdd0:/ layout keeps working; the new ATA BDM
+		   toggle is cleared. */
+		if (cfg.hddenable == 1 && cfg.atabdmenable == 1)
+			cfg.atabdmenable = 0;
+
+		if (cfg.mode == GSK_VIDMODE_240P ||
+		    cfg.mode == GSK_VIDMODE_480I ||
+		    cfg.mode == GSK_VIDMODE_1080I)
+			g_GskVideoMode = cfg.mode;
+		else
+			g_GskVideoMode = GSK_VIDMODE_480I;
+
+		if (cfg.offx >= -64 && cfg.offx <= 64) g_GskDispOffX = cfg.offx;
+		if (cfg.offy >= -64 && cfg.offy <= 64) g_GskDispOffY = cfg.offy;
+		if (cfg.overscan >= 0 && cfg.overscan <= 100) g_GskOverscan = cfg.overscan;
+		if (cfg.widescreen == 0 || cfg.widescreen == 1) g_GskWidescreen = cfg.widescreen;
+		if (cfg.covers == 0 || cfg.covers == 1) CoverSetEnabled(cfg.covers ? TRUE : FALSE);
+		if (cfg.bgmvol >= 0 && cfg.bgmvol <= 100) BgmSetVolume(cfg.bgmvol);
+		if (cfg.bgmrate >= 8000 && cfg.bgmrate <= 48000) BgmSetRate(cfg.bgmrate);
+		if (cfg.gamevol >= 0 && cfg.gamevol <= 100) AudMixGameSetVolume(cfg.gamevol);
+		if (cfg.hddenable == 0 || cfg.hddenable == 1) HddSupportSetEnabled(cfg.hddenable);
+		if (cfg.mmceenable == 0 || cfg.mmceenable == 1) MmceSupportSetEnabled(cfg.mmceenable);
+		if (cfg.massenable == 0 || cfg.massenable == 1) MassStorageSetEnabled(cfg.massenable);
+		if (cfg.smbenable == 0 || cfg.smbenable == 1) SmbSupportSetEnabled(cfg.smbenable);
+		if (cfg.mx4sioenable == 0 || cfg.mx4sioenable == 1) Mx4sioSetEnabled(cfg.mx4sioenable);
+		if (cfg.colorprofile >= 0 && cfg.colorprofile < SNPPU_COLOR_PROFILE_COUNT)
+			SNPPUColorSetProfile(cfg.colorprofile);
+		if (cfg.frameskip == 0 || cfg.frameskip == 1)
+			MainLoopSafeFrameskipSetEnabled(cfg.frameskip ? TRUE : FALSE);
+		if (cfg.atabdmenable == 0 || cfg.atabdmenable == 1)
+			AtaBdmAssaultSetEnabled(cfg.atabdmenable);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Screen                                                              */
+/* ------------------------------------------------------------------ */
+
+CVideoScreen::CVideoScreen()
+{
+	m_iSelect = 0;
+}
+
+void CVideoScreen::Process()
+{
+}
+
+static void _VideoCenter(int x, int y, const char *pStr)
+{
+	FontPuts(x - FontGetStrWidth(pStr) / 2, y, pStr);
+}
+
+static void _VideoRow(int vy, int idx, int sel, const char *pLabel, const char *pValue)
+{
+	if (idx == sel)
+	{
+		PolyColor4f(0.0f, 0.5f, 0.0f, 0.5f);
+		PolyRect(48, vy - 1, 160, FontGetHeight() + 2);
+	}
+
+	FontColor4f(0.5f, 0.5f, 0.5f, 1.0f);
+	FontPuts(56, vy, pLabel);
+
+	FontColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	FontPuts(150, vy, pValue);
+}
+
+static void _VideoHeader(int vy, const char *pStr)
+{
+	PolyColor4f(0.0f, 0.2f, 0.2f, 0.5f);
+	PolyRect(32, vy, 256 - 64, 9);
+	FontColor4f(0.0f, 0.8f, 0.8f, 1.0f);
+	_VideoCenter(128, vy, pStr);
+}
+
+static const char *_VideoMmceStatus()
+{
+	int slots;
+
+	if (!MmceSupportIsEnabled()) return "\xe5\x85\xb3";
+	if (MmceNeedsRestart())      return "\xe9\x9c\x80\xe9\x87\x8d\xe5\x90\xaf";
+	if (MmceGetLastError() < 0)  return "\xe9\xa9\xb1\xe5\x8a\xa8\xe9\x94\x99\xe8\xaf\xaf";
+	if (!MmceIsLoaded())         return "\xe5\xbc\x80";
+
+	slots = MmceGetAvailableSlots();
+	if (slots == 1) return "\xe6\xa7\xbd\xe4\xbd\x8d" "1";
+	if (slots == 2) return "\xe6\xa7\xbd\xe4\xbd\x8d" "2";
+	if (slots == 3) return "\xe6\xa7\xbd\xe4\xbd\x8d" "1+2";
+	return "\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0";
+}
+
+static const char *_VideoMx4sioStatus()
+{
+	if (!Mx4sioIsEnabled())       return "\xe5\x85\xb3";
+	if (Mx4sioNeedsRestart())     return "\xe9\x9c\x80\xe9\x87\x8d\xe5\x90\xaf";
+	if (Mx4sioGetLastError() < 0) return "\xe9\xa9\xb1\xe5\x8a\xa8\xe9\x94\x99\xe8\xaf\xaf";
+	return Mx4sioIsLoaded() ? "\xe5\xbc\x80" : "\xe5\xb7\xb2\xe5\x90\xaf\xe7\x94\xa8";
+}
+
+typedef struct
+{
+	Int32 mode;
+	const char *name;
+} VideoModeChoiceT;
+
+static const VideoModeChoiceT _VideoModes[] =
+{
+	{ GSK_VIDMODE_240P,  "240p/288p (CRT)" },
+	{ GSK_VIDMODE_480I,  "480i (default)" },
+	{ GSK_VIDMODE_1080I, "1080i" }
+};
+
+static Int32 _VideoModeIndex(Int32 mode)
+{
+	Int32 i;
+	for (i = 0; i < (Int32)(sizeof(_VideoModes) / sizeof(_VideoModes[0])); i++)
+		if (_VideoModes[i].mode == mode)
+			return i;
+	return 0;
+}
+
+void CVideoScreen::Draw()
+{
+	Int32 vy = 15;
+	char  buf[16];
+	int   m = _VideoModeIndex(g_GskVideoMode);
+	const char *pMode = _VideoModes[m].name;
+	bool  bDevices = (m_iSelect >= 10);  /* pagina 2/2 = dispositivos */
+	const char *pWide = "\xe5\x85\xb3";
+	const char *pColor = (SNPPUColorGetProfile() == SNPPU_COLOR_PROFILE_COMPOSITE)
+	                   ? "\xe5\xa4\x8d\xe5\x90\x88" : "\xe5\x8e\x9f\xe7\x89\x88";
+
+	if (g_GskWidescreen)
+		pWide = "\xe5\xbc\x80";
+
+	FontSelect(0);
+
+	_VideoHeader(vy, bDevices ? "\xe8\xa7\x86\xe9\xa2\x91\xe8\xae\xbe\xe7\xbd\xae (2/2)" : "\xe8\xa7\x86\xe9\xa2\x91\xe8\xae\xbe\xe7\xbd\xae (1/2)");
+	vy += 18;
+
+	if (!bDevices) {
+	_VideoHeader(vy, "\xe5\xb1\x8f\xe5\xb9\x95");
+	vy += 14;
+
+	_VideoRow(vy, 0, m_iSelect, "\xe8\xa7\x86\xe9\xa2\x91\xe6\xa8\xa1\xe5\xbc\x8f", pMode);  vy += 12;
+
+	_VideoRow(vy, 1, m_iSelect, "\xe5\xae\xbd\xe5\xb1\x8f", pWide); vy += 12;
+
+	_VideoRow(vy, 2, m_iSelect, "SNES\xe8\x89\xb2\xe5\xbd\xa9", pColor); vy += 12;
+
+	snprintf(buf, sizeof(buf), "%d", g_GskOverscan);
+	_VideoRow(vy, 3, m_iSelect, "\xe8\xbf\x87\xe6\x89\xab\xe6\x8f\x8f", buf);      vy += 12;
+
+	snprintf(buf, sizeof(buf), "%d", g_GskDispOffX);
+	_VideoRow(vy, 4, m_iSelect, "\xe5\x81\x8f\xe7\xa7\xbbX", buf);      vy += 12;
+
+	snprintf(buf, sizeof(buf), "%d", g_GskDispOffY);
+	_VideoRow(vy, 5, m_iSelect, "\xe5\x81\x8f\xe7\xa7\xbbY", buf);      vy += 12;
+
+	_VideoRow(vy, 6, m_iSelect, "\xe5\xb0\x81\xe9\x9d\xa2\xe6\x98\xbe\xe7\xa4\xba", CoverIsEnabled() ? "\xe5\xbc\x80" : "\xe5\x85\xb3"); vy += 12;
+
+	_VideoHeader(vy, "\xe9\x9f\xb3\xe9\xa2\x91"); vy += 14;
+
+	snprintf(buf, sizeof(buf), "%d", AudMixGameGetVolume());
+	_VideoRow(vy, 7, m_iSelect, "\xe6\xb8\xb8\xe6\x88\x8f\xe9\x9f\xb3\xe9\x87\x8f", buf); vy += 12;
+
+	{
+		int bv = BgmGetVolume();
+		if (bv <= 0)                 snprintf(buf, sizeof(buf), "\xe5\x85\xb3");
+		else if (BgmTrackCount() <= 0)
+			snprintf(buf, sizeof(buf),
+			         BgmIsSearching() ? "\xe6\x90\x9c\xe7\xb4\xa2\xe4\xb8\xad" : "\xe6\x97\xa0\xe9\x9f\xb3\xe8\xbd\xa8");
+		else                         snprintf(buf, sizeof(buf), "%d", bv);
+	}
+	_VideoRow(vy, 8, m_iSelect, "\xe8\x8f\x9c\xe5\x8d\x95\xe9\x9f\xb3\xe4\xb9\x90", buf); vy += 12;
+
+	snprintf(buf, sizeof(buf), "%d kHz", (BgmGetRate() + 500) / 1000);
+	_VideoRow(vy, 9, m_iSelect, "\xe9\xa2\x91\xe7\x8e\x87", buf); vy += 12;
+	}
+	else
+	{
+		_VideoHeader(vy, "\xe6\x80\xa7\xe8\x83\xbd"); vy += 14;
+
+		_VideoRow(vy, 10, m_iSelect, "\xe8\xb7\xb3\xe5\xb8\xa7",
+		          MainLoopSafeFrameskipIsEnabled() ? "\xe5\xbc\x80" : "\xe5\x85\xb3"); vy += 12;
+
+		_VideoHeader(vy, "\xe5\xad\x98\xe5\x82\xa8/\xe8\xae\xbe\xe5\xa4\x87"); vy += 14;
+
+		_VideoRow(vy, 11, m_iSelect, "USB\xe5\xad\x98\xe5\x82\xa8",
+		          MassStorageIsEnabled() ? "\xe5\xbc\x80" : "\xe5\x85\xb3"); vy += 12;
+		_VideoRow(vy, 12, m_iSelect, "\xe7\xa1\xac\xe7\x9b\x98(APA)",
+		          HddSupportIsEnabled() ? "\xe5\xbc\x80" : "\xe5\x85\xb3"); vy += 12;
+		_VideoRow(vy, 13, m_iSelect, "\xe5\x86\x85\xe7\xbd\xae\xe7\xa1\xac\xe7\x9b\x98(FAT/exFAT)",
+		          AtaBdmAssaultIsEnabled() ? "\xe5\xbc\x80" : "\xe5\x85\xb3"); vy += 12;
+		_VideoRow(vy, 14, m_iSelect, "MMCE\xe8\xae\xb0\xe5\xbf\x86\xe5\x8d\xa1",
+		          _VideoMmceStatus()); vy += 12;
+		_VideoRow(vy, 15, m_iSelect, "SMB(\xe7\xbd\x91\xe7\xbb\x9c)",
+		          SmbGetStatusText()); vy += 12;
+		_VideoRow(vy, 16, m_iSelect, "MX4SIO(SD\xe5\x8d\xa1)",
+		          _VideoMx4sioStatus()); vy += 12;
+	}
+
+	/* controls / hints (clear of the vy=215 footer) */
+	vy = 184;
+	FontColor4f(0.6f, 0.6f, 0.6f, 1.0f);
+	_VideoCenter(128, vy, "\xe4\xb8\x8a/\xe4\xb8\x8b:\xe9\x80\x89\xe6\x8b\xa9  \xe5\xb7\xa6/\xe5\x8f\xb3:\xe4\xbf\xae\xe6\x94\xb9  X:\xe4\xbf\x9d\xe5\xad\x98"); vy += 12;
+	_VideoCenter(128, vy, "\xe2\x97\x8b:\xe5\x88\x87\xe6\x8d\xa2\xe9\xa1\xb5\xe9\x9d\xa2"); vy += 12;
+
+	if (g_GskVideoMode != GSK_GetActiveVideoMode())
+	{
+		FontColor4f(1.0f, 0.88f, 0.46f, 1.0f);
+		_VideoCenter(128, vy, "\xe6\xa8\xa1\xe5\xbc\x8f\xe9\x9c\x80\xe9\x87\x8d\xe5\x90\xaf\xe5\x90\x8e\xe7\x94\x9f\xe6\x95\x88");
+	}
+	else if (MmceNeedsRestart() || Mx4sioNeedsRestart())
+	{
+		FontColor4f(1.0f, 0.88f, 0.46f, 1.0f);
+		_VideoCenter(128, vy, "\xe5\xad\x98\xe5\x82\xa8\xe8\xae\xbe\xe7\xbd\xae\xe9\x9c\x80\xe9\x87\x8d\xe5\x90\xaf\xe5\x90\x8e\xe7\x94\x9f\xe6\x95\x88");
+	}
+}
+
+void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
+{
+	int dir = 0;
+
+	/* Circle (O) alterna entre as 2 paginas: Video/Audio (idx 0-9) e
+	   Performance/Devices (10-16). NAO uso L1/R1 aqui de proposito -- eles ja trocam
+	   de ABA no nivel global (Browser/Network/Menu/Log/Video). */
+	if (trigger & PAD_CIRCLE)
+		m_iSelect = (m_iSelect >= 10) ? 0 : 10;
+
+	{
+		int lo = (m_iSelect >= 10) ? 10 : 0;
+		int hi = (m_iSelect >= 10) ? 16 : 9;
+		if (trigger & PAD_UP)    { m_iSelect--; if (m_iSelect < lo) m_iSelect = hi; }
+		if (trigger & PAD_DOWN)  { m_iSelect++; if (m_iSelect > hi) m_iSelect = lo; }
+	}
+
+	if (trigger & PAD_LEFT)  dir = -1;
+	if (trigger & PAD_RIGHT) dir = +1;
+
+	if (dir != 0)
+	{
+		switch (m_iSelect)
+		{
+		case 0: /* video mode (applied on reboot) */
+			{
+				Int32 count = (Int32)(sizeof(_VideoModes) / sizeof(_VideoModes[0]));
+				Int32 modeIndex = _VideoModeIndex(g_GskVideoMode) + dir;
+				if (modeIndex < 0)      modeIndex = count - 1;
+				if (modeIndex >= count) modeIndex = 0;
+				g_GskVideoMode = _VideoModes[modeIndex].mode;
+			}
+			break;
+
+		case 1: /* widescreen on/off (live) */
+			g_GskWidescreen = !g_GskWidescreen;
+			GSK_SetWidescreen(g_GskWidescreen);
+			break;
+
+		case 2: /* SNES colour profile (live) */
+			SNPPUColorSetProfile(
+				SNPPUColorGetProfile() == SNPPU_COLOR_PROFILE_ORIGINAL
+				? SNPPU_COLOR_PROFILE_COMPOSITE
+				: SNPPU_COLOR_PROFILE_ORIGINAL);
+			break;
+
+		case 3: /* overscan 0..100 (live, step 5) */
+			g_GskOverscan += dir * 5;
+			if (g_GskOverscan < 0)   g_GskOverscan = 0;
+			if (g_GskOverscan > 100) g_GskOverscan = 100;
+			GSK_SetOverscan(g_GskOverscan);
+			break;
+
+		case 4: /* offset X (live) */
+			g_GskDispOffX += dir;
+			if (g_GskDispOffX < -64) g_GskDispOffX = -64;
+			if (g_GskDispOffX >  64) g_GskDispOffX =  64;
+			GSK_SetDisplayOffset(g_GskDispOffX, g_GskDispOffY);
+			break;
+
+		case 5: /* offset Y (live) */
+			g_GskDispOffY += dir;
+			if (g_GskDispOffY < -64) g_GskDispOffY = -64;
+			if (g_GskDispOffY >  64) g_GskDispOffY =  64;
+			GSK_SetDisplayOffset(g_GskDispOffX, g_GskDispOffY);
+			break;
+
+		case 6: /* cover art on/off (live; persisted on X like the rest) */
+			CoverToggle();
+			break;
+
+		case 7: /* game (emulator) audio volume 0..100, step 1, live */
+			{
+				int v = AudMixGameGetVolume() + dir;
+				if (v < 0)   v = 0;
+				if (v > 100) v = 100;
+				AudMixGameSetVolume(v);
+			}
+			break;
+
+		case 8: /* menu music volume 0..100 (0 = off), step 1, live */
+			{
+				int v = BgmGetVolume() + dir;
+				if (v < 0)   v = 0;
+				if (v > 100) v = 100;
+				BgmSetVolume(v);
+			}
+			break;
+
+		case 9: /* frequencia de sintese da trilha (cicla a lista) */
+			BgmCycleRate(dir);
+			break;
+
+		case 10: /* adaptive frameskip on/off (live, persisted on save) */
+			MainLoopSafeFrameskipSetEnabled(
+				MainLoopSafeFrameskipIsEnabled() ? FALSE : TRUE);
+			break;
+
+		case 11: /* Mass / USB on/off -- lista mass0:/mass1: (USB).  O USB core
+		           sobe no boot de qualquer forma (seguro); isto controla a
+		           listagem.  O MX4SIO agora tem toggle proprio (case 16). */
+			MassStorageSetEnabled(!MassStorageIsEnabled());
+			break;
+
+		case 12: /* HDD interno APA (hdd0:) on/off -- lista + carga preguicosa.
+		            MUTUAMENTE EXCLUSIVO com o ATA BDM: ambos sao donos do ATA. */
+			HddSupportSetEnabled(!HddSupportIsEnabled());
+			if (HddSupportIsEnabled())
+				AtaBdmAssaultSetEnabled(0);
+			break;
+
+		case 13: /* ATA-Assault ATA→BDM: HD interno FAT/exFAT listado como massN:.
+		            Desliga o APA (hdd0:) se ele estava ligado (conflito ATA). */
+			AtaBdmAssaultSetEnabled(!AtaBdmAssaultIsEnabled());
+			if (AtaBdmAssaultIsEnabled())
+				HddSupportSetEnabled(0);
+			break;
+
+		case 14: /* MMCE (mmce0/1) on/off -- lista + carga preguicosa. */
+			MmceSupportSetEnabled(!MmceSupportIsEnabled());
+			if (MmceSupportIsEnabled())
+			{
+				BgmIOBegin();
+				MmceProbeAvailableSlots();
+				BgmIOEnd();
+			}
+			break;
+
+		case 15: /* SMB on/off. Driver/network stay lazy until smb: is opened. */
+			if (SmbSupportIsEnabled())
+			{
+				BgmIOBegin();
+				SmbDisconnect();
+				BgmIOEnd();
+				SmbSupportSetEnabled(0);
+			}
+			else
+			{
+				SmbSupportSetEnabled(1);
+			}
+			break;
+
+		case 16: /* MX4SIO (SD via SIO2) on/off -- carga preguicosa (deferida).
+		            Padrao OFF: quem nao tem o adaptador evita o flood de
+		            sondagem do SIO2.  Independente do Mass/USB. */
+			Mx4sioSetEnabled(!Mx4sioIsEnabled());
+			if (Mx4sioIsEnabled())
+			{
+				BgmIOBegin();
+				Mx4sioLoadIfEnabled();
+				BgmIOEnd();
+			}
+			break;
+		}
+	}
+
+	/* Square: reset the display offset (live). */
+	if (trigger & PAD_SQUARE)
+	{
+		g_GskDispOffX = 0;
+		g_GskDispOffY = 0;
+		GSK_SetDisplayOffset(0, 0);
+	}
+
+	/* Cross / Start: persist all video settings to the memory card. */
+	if (trigger & (PAD_CROSS | PAD_START))
+	{
+		VideoSettingsSave();
+	}
+}
