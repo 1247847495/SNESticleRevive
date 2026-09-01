@@ -39,6 +39,33 @@ On top of the SNES core, the project now also integrates **InfoNES** to bring
 
 ***
 
+## 🇨🇳 中文汉化
+
+<details>
+<summary>Chinese localization (汉化说明)</summary>
+
+本版本在原版基础上提供了完整的**简体中文界面汉化**，汉化作者：**anyi**。
+
+**汉化内容：**
+
+* **菜单界面** — ROM 浏览器、即时存档（Save States）、SMB 网络设置、视频设置
+  （Video Config）、日志等全部主要界面均为中文显示。
+
+* **中文 ROM 文件名** — ROM 列表可直接显示中文、日文文件名。
+
+* **SMB 虚拟键盘** — 输入共享名/用户名/密码时使用屏幕虚拟键盘。
+
+* **版本标识** — 状态栏显示 `SNESticle Revive PS2 anyi`。
+
+**Chinese localization summary:** the UI, menus and on-screen hints are fully
+translated to Simplified Chinese. Chinese/Japanese ROM filenames are displayed
+correctly. SMB credentials are entered through an on-screen virtual keyboard.
+Localization by **anyi**.
+
+</details>
+
+***
+
 ## 📚 Table of Contents
 
 * [⚠️ Notes](#️-notes)
@@ -805,33 +832,6 @@ share itself as read-only too. A minimal Samba share is:
 > (`bdm.irx = 0`, `hdd (hdd0:) = N`, …), so a failure is visible in a photo of
 > the screen. On a console without an internal HDD the `dev9`/`hdd` probe just
 > reports "no hardware" and boot continues — it does not hang.
-
-</details>
-
-***
-
-## 🇨🇳 中文汉化
-
-<details>
-<summary>Chinese localization (汉化说明)</summary>
-
-本版本在原版基础上提供了完整的**简体中文界面汉化**，汉化作者：**anyi**。
-
-**汉化内容：**
-
-* **菜单界面** — ROM 浏览器、即时存档（Save States）、SMB 网络设置、视频设置
-  （Video Config）、日志等全部主要界面均为中文显示。
-
-* **中文 ROM 文件名** — ROM 列表可直接显示中文、日文文件名。
-
-* **SMB 虚拟键盘** — 输入共享名/用户名/密码时使用屏幕虚拟键盘。
-
-* **版本标识** — 状态栏显示 `SNESticle Revive PS2 anyi`。
-
-**Chinese localization summary:** the UI, menus and on-screen hints are fully
-translated to Simplified Chinese. Chinese/Japanese ROM filenames are displayed
-correctly. SMB credentials are entered through an on-screen virtual keyboard.
-Localization by **anyi**.
 
 </details>
 
