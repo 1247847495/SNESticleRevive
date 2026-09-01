@@ -9,6 +9,12 @@
   </font></b>
 </p>
 
+<p align="center">
+  <b><font size="5">🇨🇳 简体中文汉化版（汉化作者：anyi）</font></b>
+</p>
+
+> **中文说明**：本版本提供完整的简体中文界面汉化 —— 菜单、ROM 浏览器、即时存档、SMB 网络设置、视频设置均为中文显示，ROM 列表可直接显示中文文件名。详见下方 [🇨🇳 中文汉化](#-中文汉化) 章节。
+
 Revived and actively-maintained source of **SNESticle**, the long-rumored
 **Super Nintendo (SNES) emulator** written by **Icer Addis (iaddis)**.
 
