@@ -50,6 +50,31 @@ extern int g_GskWidescreen;   /* 0 = 4:3, 1 = safe mode-specific 16:9           
 /* Set the display offset live (no VRAM realloc) and remember it for the
    next GSK_Init. X is in VCK units, matching FCEUmm-PS2. */
 void GSK_SetDisplayOffset(int x, int y);
+/* Runtime-only game bias; does not change/save g_GskDispOffY. */
+void GSK_SetGameplayYOffsetBias(int y);
+/* AURORA_MD_UI256_320FB_V1_20260823
+ * Present logical 256-wide UI without fractional scaling while MD keeps
+ * its physical 320-wide 240p framebuffer alive. */
+void GSK_SetUi256On320Framebuffer(int on);
+/* AURORA_PCE_NATIVE_GS_RASTER_V5_20260830
+ * 240p physical sample raster:
+ * 256 (SNES/NES/common PCE), 320 (MD), 342/512 (PCE dot-clock modes). */
+void GSK_Set240pFramebufferWidth(int width);
+int GSK_Get240pFramebufferWidth(void);
+
+/* AURORA_PCE_ACTIVEFB_RECONCILE_V14R2_20260830
+ * Largura física do framebuffer gsKit atualmente ativo. */
+int GSK_GetActiveFramebufferWidth(void);
+
+/* AURORA_PCE_KRAZY_RUNTIME_DIAG_V11R3_20260830: hidden runtime probe retained for future diagnostics. */
+void GSK_GetPceDebugState(int *fbw, int *winw, int *dw, int *magh,
+                          int *startx, int *overscan, int *wide);
+
+/* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830
+ * Select a 1:1 visible window inside the current 240p framebuffer.
+ * Intended for PCE fixed-512 gameplay: source samples remain untouched. */
+void GSK_Set240pVisibleWindow(int x, int width);
+void GSK_Clear240pVisibleWindow(void);
 
 /* Apply overscan (0..100) live by re-emitting the GS DISPLAY register.
    0 reproduces gsKit's normal output exactly. */
@@ -57,6 +82,10 @@ void GSK_SetOverscan(int percent);
 
 /* Toggle the PCRTC 16:9 presentation live (1 = on, 0 = 4:3). */
 void GSK_SetWidescreen(int on);
+
+/* NES/SNES 240p pixel-aspect correction. Keeps the 256-pixel framebuffer
+   untouched and changes only PCRTC horizontal magnification. */
+void GSK_SetNative240pPar(int on);
 
 /* Tear down and rebuild the GS for the current g_GskVideoMode. The caller
    MUST re-upload any textures it owns afterwards (e.g. FontInit). Intended
@@ -67,6 +96,9 @@ void GSK_ReinitVideo(void);
    Differs from g_GskVideoMode after the settings are loaded but before
    GSK_ReinitVideo() runs. */
 int GSK_GetActiveVideoMode(void);
+
+/* AURORA_MEGA_V2_GS_REFRESH_DECL: exact presentation clock for audio pacing. */
+void GSK_GetRefreshRate(Uint32 *pNumerator, Uint32 *pDenominator);
 
 /* Returns the active gsKit global, or NULL if GSK_Init has not run. */
 struct gsGlobal *GSK_GetGlobal(void);
@@ -79,6 +111,21 @@ Uint32 GSK_VramAllocTBP(Uint32 nBytes);
    the GIF channel. Use this before the SNES blender kicks its own raw
    DMA chain on the GIF channel. */
 void GSK_DrainAndWait(void);
+
+/* AURORA_GS_RAWGIF_DRAIN_V1
+ * Bridge-only drain: submit gsKit and wait until GIF DMA has finished feeding
+ * the same path-3 channel, but do not wait for the GS FINISH token itself.
+ * Packet execution order is still preserved by the GIF. */
+void GSK_DrainForRawGif(void);
+
+/* AURORA_GS_PARTIAL_GAMEPLAY_CLEAR_V1
+ * Hint that the current frame will immediately receive the normal full-width,
+ * bottom-reaching gameplay texture blit. When enabled, GSK_ResetFrame limits
+ * its black clear to a conservative top strip and restores full scissor before
+ * subsequent primitives. Default/off keeps the historical full clear. */
+void GSK_SetGameplayFastClear(Bool enabled);
+/* AURORA_PD_DIRECT_MD_SKIP_CLEAR_V3_H_20260821 */
+void GSK_SetGameplaySkipClear(Bool enabled);
 
 /* Drain gsKit's draw queue and wait. Equivalent to GSK_DrainAndWait
    but kept as a separate name for clarity in the per-frame flush. */

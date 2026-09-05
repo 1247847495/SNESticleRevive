@@ -41,6 +41,13 @@ static GSGLOBAL *_pGsGlobal = NULL;
 static int       _gsk_initialised = 0;
 static int       _gsk_invalidate_pending = 0;
 
+/* AURORA_GS_LATENCY_V1
+ * Off by default: every caller that does not explicitly opt into the gameplay
+ * fast-clear path retains the exact historical full-frame clear. */
+static Bool      _gsk_gameplay_fast_clear = FALSE;
+/* AURORA_PD_DIRECT_MD_SKIP_CLEAR_V3_C_20260821 */
+static Bool      _gsk_gameplay_skip_clear = FALSE;
+
 /* Video mode + display offset (selectable in the Settings screen).
    480i is the safe default and 1080i is the only alternate output. */
 int g_GskVideoMode = GSK_VIDMODE_480I;
@@ -52,6 +59,18 @@ static int _gsk_vck         = 4;   /* display-offset VCK units            */
 static int _gsk_fb_width    = 640; /* active FB width                     */
 static int _gsk_fb_height   = 480; /* active FB height                    */
 static int _gsk_active_mode = GSK_VIDMODE_480I; /* mode the GS is in now   */
+static int _gsk_native240p_par = 0;
+static int _gsk_240p_fb_width = 256;
+/* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830
+ * Optional horizontal scanout window inside the 240p framebuffer.
+ * -1 means normal full-framebuffer presentation. */
+static int _gsk_240p_window_x = -1;
+static int _gsk_240p_window_w = 0;
+/* AURORA_MD_UI256_320FB_V1_20260823
+ * Keep MD's physical 320-wide framebuffer while its cartridge is alive,
+ * but draw/scan Aurora's UI as exactly 256 uniform source pixels. */
+static int _gsk_ui256_on_320fb = 0;
+static int _gsk_game_y_bias = 0;
 
 /* gsKit's computed DISPLAY params, captured after gsKit_init_screen so
    overscan/widescreen can be recomputed from a clean baseline. */
@@ -69,6 +88,26 @@ GSGLOBAL *GSK_GetGlobal(void)
 {
     return _pGsGlobal;
 }
+
+/* AURORA_MEGA_V2_GS_REFRESH_IMPL
+ * PS2 NTSC VBlank is the 59.94-family clock, not exactly 60.000 Hz. Feeding
+ * this rational to the audio mixer prevents a slow ring-buffer phase drift.
+ */
+void GSK_GetRefreshRate(Uint32 *pNumerator, Uint32 *pDenominator)
+{
+    if (!pNumerator || !pDenominator) return;
+    if (_pGsGlobal && _pGsGlobal->Mode == GS_MODE_PAL)
+    {
+        *pNumerator = 50;
+        *pDenominator = 1;
+    }
+    else
+    {
+        *pNumerator = 60000;
+        *pDenominator = 1001;
+    }
+}
+
 
 /* Detect the console's TV region from the BIOS ROMVER region byte.
  *
@@ -144,7 +183,7 @@ void GSK_Init(int width, int height,
         _pGsGlobal->Mode      = _gsk_DetectTvMode();
         _pGsGlobal->Interlace = GS_NONINTERLACED;
         _pGsGlobal->Field     = GS_FRAME;
-        _gsk_fb_width         = 256;
+        _gsk_fb_width         = _gsk_240p_fb_width;
         _gsk_fb_height        = 240;
         _gsk_vck              = 4;
         break;
@@ -289,6 +328,15 @@ static void _GskApplyRenderTransform(void)
     float sx = (float)_gsk_fb_width / (float)GSK_LOGICAL_W;
     float sy = (float)_gsk_fb_height / (float)GSK_LOGICAL_H;
 
+    /* AURORA_MD_UI256_320FB_V1_20260823
+     * No 256->320 fractional UI scaling. Draw logical UI columns 1:1. */
+    if (_gsk_ui256_on_320fb &&
+        _gsk_active_mode == GSK_VIDMODE_240P &&
+        _gsk_fb_width == 320)
+    {
+        sx = 1.0f;
+    }
+
     GPPrimSetTransform(sx, sy, 0.0f, 0.0f);
 }
 
@@ -317,6 +365,141 @@ static void _GskApplyDisplay(void)
         dh     = _gsk_base_dh - sy * 2;
         startx = _gsk_base_startx + sx;
         starty = _gsk_base_starty + sy;
+    }
+
+    /* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830
+     * Fixed-512 PCE gameplay: present only the active source-width window.
+     * FRAME/DISPFB stride remains 512, so changing 256/342/512 does not
+     * require GS reinitialisation. DBX hides stale padding completely.
+     *
+     * Match the old native-raster physical timing:
+     *   256 -> existing native-PAR path
+     *   352 -> 8 VCK/sample (full 7 MHz overscan)
+     *   512 -> use the 512-mode base geometry
+     */
+    if (_gsk_active_mode == GSK_VIDMODE_240P &&
+        _gsk_240p_window_x >= 0 &&
+        _gsk_240p_window_w > 0 &&
+        g_GskOverscan == 0)
+    {
+        const int winw = _gsk_240p_window_w;
+
+        /* AURORA_PCE_MODECLOCK_APERTURE_HALFTEXEL_V10_20260830
+         * PCE dot-clock presentation on the fixed 512 storage raster.
+         *
+         * Keep every source sample intact; only PCRTC sample width changes.
+         * 256 and 512 clocks have an exact 2:1 relation, so 10/5 VCK keeps
+         * their analogue picture width identical (2560 VCK).
+         *
+         * The 7 MHz clock ideally falls halfway between two GS integer MAGH
+         * steps (~7.5 VCK/sample when the 5 MHz mode is 10). GS cannot express
+         * a half step. Prefer 7 rather than 8 so full 352-wide Japanese modes
+         * (e.g. R-Type) remain inside the CRT aperture instead of losing side
+         * detail. This is a uniform pixel width, never fractional resampling. */
+        if (winw == 256)
+        {
+            const int contentMagH1 = 10;
+            const int contentDw = winw * contentMagH1; /* 2560 */
+            startx += (dw - contentDw) / 2;
+            dw = contentDw;
+            magh = contentMagH1 - 1;
+        }
+        else if (winw == 352)
+        {
+            const int contentMagH1 = 7;
+            const int contentDw = winw * contentMagH1; /* 2464 */
+            startx += (dw - contentDw) / 2;
+            dw = contentDw;
+            magh = contentMagH1 - 1;
+        }
+        else if (winw == 512)
+        {
+            const int contentMagH1 = 5;
+            const int contentDw = winw * contentMagH1; /* 2560 */
+            startx += (dw - contentDw) / 2;
+            dw = contentDw;
+            magh = contentMagH1 - 1;
+        }
+
+        /* Point the read circuit at the active window inside 512 storage.
+         * gsKit may rewrite DISPFB during flip, so _GskApplyDisplay is also
+         * re-run after sync_flip below. */
+        GS_SET_DISPFB2(
+            _pGsGlobal->ScreenBuffer[(_pGsGlobal->ActiveBuffer ^ 1) & 1] / 8192,
+            _gsk_fb_width / 64,
+            _pGsGlobal->PSM,
+            _gsk_240p_window_x,
+            0);
+    }
+
+    /*
+     * NES/SNES 240p horizontal PAR correction.
+     *
+     * Do NOT scale the 256x240 framebuffer. Instead reduce the PCRTC
+     * horizontal magnification by one integer step while continuing
+     * to scan all 256 framebuffer pixels.
+     *
+     * In NTSC/PAL 240p with a 256-pixel framebuffer gsKit normally
+     * resolves to 11 VCK units per framebuffer pixel (MagH = 10).
+     * Use 10 VCK units (MagH = 9) for native 256-wide gameplay. Every source pixel therefore
+     * remains exactly the same physical width as every other source pixel:
+     * no 256->248 resampling pattern, no uneven columns.
+     */
+    if (_gsk_native240p_par &&
+        _gsk_active_mode == GSK_VIDMODE_240P &&
+        g_GskOverscan == 0 &&
+        _gsk_base_magh > 0 &&
+        /* AURORA_PCE_CRT_OVERSCAN_352_V9_20260830:
+         * PCE fixed-512 windows have explicit profiles above. */
+        _gsk_240p_window_w <= 0)
+    {
+        int old_magh1 = _gsk_base_magh + 1;
+        int new_magh1 = old_magh1 - 1;
+        int srcpix    = _gsk_base_dw / old_magh1;
+        int new_dw    = srcpix * new_magh1;
+
+        /*
+         * Shift native NES/SNES 240p output two logical pixels left.
+         * new_magh1 is 10 here, so 2 source pixels = 20 PCRTC units.
+         * Do this at scanout level so no framebuffer columns are clipped.
+         */
+        startx += (dw - new_dw) / 2 - ((_gsk_fb_width == 256 ? 2 : 0) * new_magh1);
+        dw      = new_dw;
+        magh    = new_magh1 - 1;
+
+        /*
+         * SNESTICLE_NATIVE_240P_Y_BIAS
+         *
+         * Hardware-tested CRT position.
+         * Equivalent to menu Offset Y = +3.
+         *
+         * Unlike horizontal X, gsKit's vertical display offset is
+         * already expressed directly in PCRTC vertical units.
+         * Keep this at scanout level: no framebuffer crop and no
+         * PolyRect/source-coordinate modification.
+         */
+        starty += 1;
+    }
+
+    /* AURORA_MD_UI256_320FB_V1_20260823
+     * DISPLAY.DW/MAGH define how many framebuffer samples PCRTC scans.
+     * Choose one integer magnification for exactly 256 source pixels, keeping
+     * physical width as close as possible to the active 320 presentation.
+     * No source columns are duplicated unevenly. */
+    if (_gsk_ui256_on_320fb &&
+        _gsk_active_mode == GSK_VIDMODE_240P &&
+        _gsk_fb_width == 320)
+    {
+        int new_magh1 = (dw + (GSK_LOGICAL_W / 2)) / GSK_LOGICAL_W;
+        int new_dw;
+
+        if (new_magh1 < 1)  new_magh1 = 1;
+        if (new_magh1 > 16) new_magh1 = 16;
+
+        new_dw = GSK_LOGICAL_W * new_magh1;
+        startx += (dw - new_dw) / 2;
+        dw      = new_dw;
+        magh    = new_magh1 - 1;
     }
 
     /* Widescreen: stretch the picture horizontally to ~16:9 by raising
@@ -348,8 +531,38 @@ static void _GskApplyDisplay(void)
     gs->StartY = starty;
 
     /* Re-emit DISPLAY1/2 (also folds in the user X/Y offset). */
-    gsKit_set_display_offset(gs, g_GskDispOffX * _gsk_vck, g_GskDispOffY);
+    gsKit_set_display_offset(gs, g_GskDispOffX * _gsk_vck,
+                             g_GskDispOffY + _gsk_game_y_bias);
     _GskApplyRenderTransform();
+}
+
+/* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830 */
+void GSK_Set240pVisibleWindow(int x, int width)
+{
+    if (x < 0 || width <= 0 || x + width > _gsk_fb_width)
+    {
+        GSK_Clear240pVisibleWindow();
+        return;
+    }
+
+    /* AURORA_PCE_ROOT512_KRAZY_LATCH_V12_20260830 */
+    if (_gsk_240p_window_x == x && _gsk_240p_window_w == width)
+        return;
+
+    _gsk_240p_window_x = x;
+    _gsk_240p_window_w = width;
+    _GskApplyDisplay();
+}
+
+void GSK_Clear240pVisibleWindow(void)
+{
+    /* AURORA_PCE_ROOT512_KRAZY_LATCH_V12_20260830 */
+    if (_gsk_240p_window_x < 0 && _gsk_240p_window_w == 0)
+        return;
+
+    _gsk_240p_window_x = -1;
+    _gsk_240p_window_w = 0;
+    _GskApplyDisplay();
 }
 
 void GSK_SetDisplayOffset(int x, int y)
@@ -357,6 +570,62 @@ void GSK_SetDisplayOffset(int x, int y)
     g_GskDispOffX = x;
     g_GskDispOffY = y;
     _GskApplyDisplay();
+}
+
+void GSK_SetGameplayYOffsetBias(int y)
+{
+    if (_gsk_game_y_bias == y)
+        return;
+
+    _gsk_game_y_bias = y;
+    _GskApplyDisplay();
+}
+
+void GSK_SetUi256On320Framebuffer(int on)
+{
+    on = on ? 1 : 0;
+    if (_gsk_ui256_on_320fb == on)
+        return;
+
+    _gsk_ui256_on_320fb = on;
+    _GskApplyDisplay();
+}
+
+void GSK_Set240pFramebufferWidth(int width)
+{
+        /* AURORA_PCE_ROOT512_KRAZY_LATCH_V12_20260830
+     * Legal GS storage rasters. 342/352 are NOT framebuffer strides:
+     * PCE medium-dot-clock content lives inside the fixed 512 raster. */
+    if (width != 256 && width != 320 && width != 512)
+        width = 256;
+
+    _gsk_240p_fb_width = width;
+}
+
+int GSK_Get240pFramebufferWidth(void)
+{
+    return _gsk_240p_fb_width;
+}
+
+/* AURORA_PCE_ACTIVEFB_RECONCILE_V14R2_20260830 */
+int GSK_GetActiveFramebufferWidth(void)
+{
+    if (!_gsk_initialised || !_pGsGlobal)
+        return 0;
+    return _pGsGlobal->Width;
+}
+
+/* AURORA_PCE_KRAZY_RUNTIME_DIAG_V11R3_20260830 */
+void GSK_GetPceDebugState(int *fbw, int *winw, int *dw, int *magh,
+                          int *startx, int *overscan, int *wide)
+{
+    if (fbw)      *fbw = _gsk_fb_width;
+    if (winw)     *winw = _gsk_240p_window_w;
+    if (dw)       *dw = _pGsGlobal ? _pGsGlobal->DW : -1;
+    if (magh)     *magh = _pGsGlobal ? _pGsGlobal->MagH : -1;
+    if (startx)   *startx = _pGsGlobal ? _pGsGlobal->StartX : -1;
+    if (overscan) *overscan = g_GskOverscan;
+    if (wide)     *wide = g_GskWidescreen;
 }
 
 void GSK_SetOverscan(int percent)
@@ -373,16 +642,37 @@ void GSK_SetWidescreen(int on)
     _GskApplyDisplay();
 }
 
+void GSK_SetNative240pPar(int on)
+{
+    on = on ? 1 : 0;
+
+    if (_gsk_native240p_par == on)
+        return;
+
+    _gsk_native240p_par = on;
+    _GskApplyDisplay();
+}
+
 void GSK_ReinitVideo(void)
 {
-    if (!_gsk_initialised) {
+    GSGLOBAL *oldGlobal;
+
+    if (!_gsk_initialised || !_pGsGlobal) {
         return;
     }
-    /* Allow GSK_Init to run again; it re-programs the PCRTC and
-       reallocates VRAM for the (possibly new) g_GskVideoMode.  The
-       caller is responsible for re-uploading its textures (FontInit)
-       since the VRAM allocator is reset. */
+
+    /* AURORA_GSK_REINIT_FREE_V1
+     * Saved 240p/1080i is applied after the initial 480i boot. The old code
+     * created a second GSGLOBAL without destroying the first one. PicoDrive
+     * allocates its core lazily at ROM launch, so it is especially sensitive
+     * to heap lost during that earlier video reinitialisation. */
+    GSK_DrainAndWait();
+    oldGlobal = _pGsGlobal;
+
     _gsk_initialised = 0;
+    _pGsGlobal = NULL;
+    gsKit_deinit_global(oldGlobal);
+
     GSK_Init(_gsk_arg_w, _gsk_arg_h, _gsk_arg_dispx, _gsk_arg_dispy,
              _gsk_arg_psm, _gsk_arg_psmz, _gsk_arg_mode, _gsk_arg_interlace);
 }
@@ -418,6 +708,40 @@ void GSK_DrainAndWait(void)
     DmaSyncGIF();
 }
 
+/* AURORA_GS_RAWGIF_DRAIN_V1
+ *
+ * This is intentionally narrower than GSK_DrainAndWait().
+ *
+ * gsKit_queue_exec() appends a FINISH command to its queue. Waiting for that
+ * FINISH here forces the EE to sit idle until the GS has rasterized every
+ * preceding primitive. For a producer switch on the SAME GIF/path-3 channel,
+ * that is stronger than necessary: DmaSyncGIF() is sufficient to ensure the
+ * previous EE DMA source is no longer active before we start the raw chain.
+ * The GIF/GS command stream itself remains FIFO-ordered, so raw commands cannot
+ * overtake the earlier gsKit packets.
+ *
+ * Keep GSK_DrainAndWait() untouched for callers that genuinely request full
+ * GS completion. */
+void GSK_DrainForRawGif(void)
+{
+    if (!_gsk_initialised) {
+        return;
+    }
+
+    gsKit_queue_exec(_pGsGlobal);
+    DmaSyncGIF();
+}
+
+void GSK_SetGameplayFastClear(Bool enabled)
+{
+    _gsk_gameplay_fast_clear = enabled ? TRUE : FALSE;
+}
+
+void GSK_SetGameplaySkipClear(Bool enabled)
+{
+    _gsk_gameplay_skip_clear = enabled ? TRUE : FALSE;
+}
+
 void GSK_FlushFrame(void)
 {
     if (!_gsk_initialised) {
@@ -435,6 +759,10 @@ void GSK_SyncFlip(void)
     }
 
     gsKit_sync_flip(_pGsGlobal);
+    /* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830
+     * gsKit_sync_flip rewrites DISPFB2/DBX; restore active PCE window. */
+    if (_gsk_240p_window_x >= 0)
+        _GskApplyDisplay();
 }
 
 void GSK_ResetFrame(void)
@@ -518,12 +846,52 @@ void GSK_ResetFrame(void)
     *p_data++ = (u64)1;
     *p_data++ = (u64)GS_REG_COLCLAMP;
 
-    /* Clear the complete PHYSICAL framebuffer, not only the transformed
-       256x240 canvas, so overscan borders never retain stale pixels. */
+    /* Clear policy.
+     *
+     * Menu/boot/black-screen: retain the historical full physical clear.
+     *
+     * Gameplay: MainLoopRender immediately draws the game texture across the
+     * complete framebuffer width and all the way to the bottom edge.
+     *
+     * AURORA_GS_240P_CLEAR_BUDGET_V4_2
+     *
+     * The largest uncovered top margin in the current native-240p layouts is
+     * 8 framebuffer rows. The same logical margin is 16 framebuffer rows in
+     * the 640x480 source modes. Clear exactly that mode-wide maximum instead
+     * of the old fixed 32-row safety margin, then restore the full scissor.
+     *
+     * This changes only a black GS fill that is otherwise overwritten later
+     * in the same frame; it does not resample or modify game/source pixels. */
     {
         u8 previous_alpha = gs->PrimAlphaEnable;
         gs->PrimAlphaEnable = GS_SETTING_OFF;
-        gsKit_clear(gs, 0);
+
+        if (_gsk_gameplay_skip_clear)
+        {
+            /* Plain MD direct-GS paints an opaque full-frame backdrop
+             * immediately after reset, so even the top-strip clear would
+             * be overwritten before presentation. */
+        }
+        else if (_gsk_gameplay_fast_clear && gs->Width > 0 && gs->Height > 0)
+        {
+            int wanted_rows =
+                (_gsk_active_mode == GSK_VIDMODE_240P) ? 8 : 16;
+            int clear_rows =
+                (gs->Height < wanted_rows) ? gs->Height : wanted_rows;
+            u64 top_scissor = GS_SETREG_SCISSOR(
+                0, gs->Width - 1, 0, clear_rows - 1);
+            u64 full_scissor = GS_SETREG_SCISSOR(
+                0, gs->Width - 1, 0, gs->Height - 1);
+
+            gsKit_set_scissor(gs, top_scissor);
+            gsKit_clear(gs, 0);
+            gsKit_set_scissor(gs, full_scissor);
+        }
+        else
+        {
+            gsKit_clear(gs, 0);
+        }
+
         gs->PrimAlphaEnable = previous_alpha;
     }
 }
@@ -569,3 +937,7 @@ void *GSK_AsUncached(void *ptr)
 
     return (void *)(addr | 0x20000000);
 }
+
+/* AURORA_PCE_CRT_OVERSCAN_352_V9_20260830 */
+
+/* AURORA_PCE_MODECLOCK_APERTURE_HALFTEXEL_V10_20260830 */

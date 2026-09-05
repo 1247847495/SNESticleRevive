@@ -16,7 +16,7 @@ BUILD_TOTAL ?= $(words $(OBJS))
 # VERBOSE=1 mostra a mensagem de warning/erro COMPLETA (sem o corte de
 # 58 colunas do resumo) e despeja o log inteiro do compilador em
 # warnings (erros ja' fazem 'cat' do log sempre). Ex.: make VERBOSE=1
-VERBOSE ?= 0
+VERBOSE ?= 1
 SHOW_WARN_LOG ?= $(VERBOSE)
 # Largura do resumo de 1 linha; VERBOSE solta o limite (mostra tudo).
 MSG_WIDTH ?= $(if $(filter 1,$(VERBOSE)),100000,58)
@@ -33,9 +33,15 @@ PS2DEV_ENV ?= $(PS2DEV)/env.sh
 PS2DEV_REF ?= master
 PS2DEV_REPO ?= https://github.com/ps2dev/ps2dev.git
 PS2DEV_BUILD_DIR ?= $(HOME)/.cache/snesticle-ps2dev
-JOBS ?= 1
+JOBS ?= 8
 LOAD_LIMIT ?= $(JOBS)
-OUTPUT_SYNC ?= --output-sync=target
+
+# AURORA_CI_LTO_LINK_CAP_V1
+# Optional cap for GCC LTO workers. Empty locally = current behavior.
+# Continuous sets this to 2 to avoid memory spikes on GitHub runners.
+LTO_LINK_JOBS ?= 8
+LTO_LINK_FLAGS := $(if $(strip $(LTO_LINK_JOBS)),-flto=$(LTO_LINK_JOBS))
+OUTPUT_SYNC ?= --output-sync=line
 .DEFAULT_GOAL := fast
 
 PS2DEV ?= $(shell if [ -n "$$PREFIX" ]; then printf "%s/opt/ps2dev" "$$PREFIX"; else printf "%s/.local/ps2dev" "$$HOME"; fi)
@@ -51,8 +57,152 @@ TARGET_STRIPPED := $(OBJ_DIR)/SNESticle.stripped.elf
 TARGET_PACKED := $(OBJ_DIR)/SNESticle.packed.elf
 BIN2C   ?= $(PS2SDK)/bin/bin2c
 
+# QUICKNES_SNESTICLE_BEGIN
+QUICKNES_DIR ?= $(CURDIR)/src/third_party/quicknes
+QUICKNES_LIB ?= $(QUICKNES_DIR)/quicknes_libretro_ps2.a
+QUICKNES_INC := $(QUICKNES_DIR)/libretro/libretro-common/include
+QUICKNES_NATIVE_INC := $(QUICKNES_DIR)/nes_emu
+# QUICKNES_SNESTICLE_END
+
+# AURORA_PICODRIVE_STAGE2
+PICODRIVE_DIR ?= $(CURDIR)/src/third_party/picodrive
+PICODRIVE_LIB ?= $(PICODRIVE_DIR)/picodrive_libretro_ps2.a
+PICODRIVE_INC := $(PICODRIVE_DIR)/platform/libretro/libretro-common/include
+
+# AURORA_PCE_EXPERIMENTAL_V1
+PCE_DIR ?= $(CURDIR)/src/third_party/beetle-pce-fast
+PCE_RAW_LIB ?= $(PCE_DIR)/mednafen_pce_fast_libretro_ps2_raw.a
+PCE_LIB ?= $(PCE_DIR)/beetle_pce_fast_libretro_ps2.a
+PCE_PS2_MAKEFILE := $(CURDIR)/tools/Makefile.beetle-pce-fast-ps2
+PCE_NAMESPACE_TOOL := $(CURDIR)/tools/namespace_pce_archive.py
+PCE_PYTHON ?= python3
+PCE_NM ?= $(shell if command -v mips64r5900el-ps2-elf-nm >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-nm; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-nm" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-nm"; else echo nm; fi)
+PCE_OBJCOPY ?= $(shell if command -v mips64r5900el-ps2-elf-objcopy >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-objcopy; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-objcopy" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-objcopy"; else echo objcopy; fi)
+PCE_RANLIB ?= $(shell if command -v mips64r5900el-ps2-elf-ranlib >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-ranlib; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ranlib" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ranlib"; else echo ranlib; fi)
+
+# AURORA_FCEUMM_FDS_V0_6_CONFIG_BEGIN
+# FCEUmm is embedded only for Famicom Disk System. Build products live in the
+# Aurora build tree, never inside the pinned dependency checkout.
+FCEUMM_FDS_DIR ?= $(CURDIR)/src/third_party/fceumm-fds
+FCEUMM_FDS_LIBRETRO_INC := $(FCEUMM_FDS_DIR)/src/drivers/libretro
+FCEUMM_FDS_BUILD_DIR ?= $(CURDIR)/build/fceumm-fds
+FCEUMM_FDS_RAW_LIB ?= $(FCEUMM_FDS_BUILD_DIR)/fceumm_fds_libretro_ps2_raw.a
+FCEUMM_FDS_LIB ?= $(FCEUMM_FDS_BUILD_DIR)/fceumm_fds_libretro_ps2.a
+FCEUMM_FDS_PS2_MAKEFILE := $(CURDIR)/tools/Makefile.fceumm-fds-ps2
+FCEUMM_FDS_NAMESPACE_TOOL := $(CURDIR)/tools/namespace_fceumm_fds_archive.py
+FCEUMM_FDS_PREPARE_TOOL := $(CURDIR)/tools/prepare_fceumm_fds_sources.py
+FCEUMM_FDS_PYTHON ?= python3
+FCEUMM_FDS_NM ?= $(shell if command -v mips64r5900el-ps2-elf-nm >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-nm; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-nm" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-nm"; else echo nm; fi)
+FCEUMM_FDS_OBJCOPY ?= $(shell if command -v mips64r5900el-ps2-elf-objcopy >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-objcopy; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-objcopy" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-objcopy"; else echo objcopy; fi)
+FCEUMM_FDS_RANLIB ?= $(shell if command -v mips64r5900el-ps2-elf-ranlib >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-ranlib; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ranlib" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ranlib"; else echo ranlib; fi)
+FCEUMM_FDS_CORE_DEPS := $(FCEUMM_FDS_DIR)/src/fceu.c $(FCEUMM_FDS_DIR)/src/fds.c $(FCEUMM_FDS_DIR)/src/input.c $(FCEUMM_FDS_DIR)/src/input/pads.c $(FCEUMM_FDS_DIR)/src/state.c $(FCEUMM_FDS_DIR)/src/general.c $(FCEUMM_FDS_DIR)/src/video.c $(FCEUMM_FDS_DIR)/src/drivers/libretro/libretro.c $(FCEUMM_FDS_PS2_MAKEFILE) $(FCEUMM_FDS_PREPARE_TOOL)
+# AURORA_FCEUMM_FDS_V0_6_CONFIG_END
+
+# AURORA_SNES9X2010_V1
+# AURORA_SNES9X2010_V2_PS2LEAN_20260824: standalone PS2 lean core; no MSU/HD/Blargg/core-options UI.
+SNES9X2010_DIR ?= $(CURDIR)/src/third_party/snes9x2010
+SNES9X2010_RAW_LIB ?= $(SNES9X2010_DIR)/snes9x2010_libretro_ps2_raw.a
+SNES9X2010_LIB ?= $(SNES9X2010_DIR)/snes9x2010_libretro_ps2.a
+SNES9X2010_INC := $(SNES9X2010_DIR)/libretro/libretro-common/include
+SNES9X2010_PS2_MAKEFILE := $(CURDIR)/tools/Makefile.snes9x2010-ps2
+SNES9X2010_NAMESPACE_TOOL := $(CURDIR)/tools/namespace_snes9x2010_archive.py
+SNES9X2010_PYTHON ?= python3
+SNES9X2010_NM ?= $(PCE_NM)
+SNES9X2010_OBJCOPY ?= $(PCE_OBJCOPY)
+SNES9X2010_RANLIB ?= $(PCE_RANLIB)
+
+# AURORA_SNES9X2010_BUILD_OPTION_V1_20260824
+# AURORA_SNES9X2010_BUILD_OPTION_V2_20260824
+# Default is OFF. Only an explicit command-line assignment may enable the
+# large Snes9x2010 archive:
+#   make fast                 -> disabled
+#   make fast SNES9X2010=0    -> disabled
+#   make fast SNES9X2010=1    -> enabled
+#
+# Do NOT use ?= here: an exported environment value could otherwise enable
+# the core accidentally. GNU Make command-line variables outrank ordinary
+# Makefile assignments, so the explicit =1 case remains user-controllable.
+ifeq ($(origin SNES9X2010),command line)
+  ifeq ($(strip $(SNES9X2010)),1)
+    AURORA_SNES9X2010 := 1
+  else
+    AURORA_SNES9X2010 := 0
+  endif
+else
+  SNES9X2010 := 0
+  AURORA_SNES9X2010 := 0
+endif
+
+ifeq ($(AURORA_SNES9X2010),1)
+SNES9X2010_LINK_DEPS := $(SNES9X2010_LIB)
+SNES9X2010_LINK_ARGS := "$(SNES9X2010_LIB)"
+else
+SNES9X2010_LINK_DEPS :=
+SNES9X2010_LINK_ARGS :=
+endif
+# AURORA_SNES9X2010_V1_RUNTIMEFIX_20260824
+# Track core source changes without forcing a full core clean on every build.
+SNES9X2010_CORE_DEPS := $(shell find "$(SNES9X2010_DIR)/src" "$(SNES9X2010_DIR)/libretro" "$(SNES9X2010_DIR)/filter" -type f \( -name '*.c' -o -name '*.h' \) 2>/dev/null)
+SNES9X2010_CORE_DEPS += $(SNES9X2010_DIR)/build/Makefile.common
+
+# AURORA_PD_TRYAGAIN_V1_PS2_BUILD_PARITY
+# PicoDrive's standalone PS2 configure path explicitly uses -G0. Keep
+# the embedded libretro core on the same EE small-data ABI assumption;
+# optimization level/LTO remain owned by PicoDrive's own Makefiles.
+PICODRIVE_PS2_SAFE_FLAGS := -G0
+
+# PicoDrive is intentionally built with STATIC_LINKING=0 so its libretro-common
+# helpers are self-contained in the archive. PicoDrive's root Makefile enables
+# -flto in that mode, therefore the archive must be indexed by GCC's plugin-
+# aware gcc-ar rather than plain binutils ar.
+
+# PicoDrive and QuickNES both embed emu2413 and export the same OPLL_* C API.
+# Keep the implementations isolated by namespacing PicoDrive's copy at compile
+# time. The macros affect PicoDrive only because they are injected through the
+# PicoDrive sub-make CC command.
+PICODRIVE_OPLL_NS_FLAGS := \
+	-DOPLL_RateConv_new=PD_OPLL_RateConv_new \
+	-DOPLL_RateConv_reset=PD_OPLL_RateConv_reset \
+	-DOPLL_RateConv_putData=PD_OPLL_RateConv_putData \
+	-DOPLL_RateConv_getData=PD_OPLL_RateConv_getData \
+	-DOPLL_RateConv_delete=PD_OPLL_RateConv_delete \
+	-DOPLL_new=PD_OPLL_new \
+	-DOPLL_delete=PD_OPLL_delete \
+	-DOPLL_reset=PD_OPLL_reset \
+	-DOPLL_resetPatch=PD_OPLL_resetPatch \
+	-DOPLL_setRate=PD_OPLL_setRate \
+	-DOPLL_setQuality=PD_OPLL_setQuality \
+	-DOPLL_setPan=PD_OPLL_setPan \
+	-DOPLL_setPanFine=PD_OPLL_setPanFine \
+	-DOPLL_setChipType=PD_OPLL_setChipType \
+	-DOPLL_writeIO=PD_OPLL_writeIO \
+	-DOPLL_writeReg=PD_OPLL_writeReg \
+	-DOPLL_calc=PD_OPLL_calc \
+	-DOPLL_calcStereo=PD_OPLL_calcStereo \
+	-DOPLL_setPatch=PD_OPLL_setPatch \
+	-DOPLL_copyPatch=PD_OPLL_copyPatch \
+	-DOPLL_forceRefresh=PD_OPLL_forceRefresh \
+	-DOPLL_dumpToPatch=PD_OPLL_dumpToPatch \
+	-DOPLL_patchToDump=PD_OPLL_patchToDump \
+	-DOPLL_getDefaultPatch=PD_OPLL_getDefaultPatch \
+	-DOPLL_setMask=PD_OPLL_setMask \
+	-DOPLL_toggleMask=PD_OPLL_toggleMask
+PICODRIVE_AR ?= $(shell \
+	if command -v mips64r5900el-ps2-elf-gcc-ar >/dev/null 2>&1; then \
+		command -v mips64r5900el-ps2-elf-gcc-ar; \
+	elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-gcc-ar" ]; then \
+		echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-gcc-ar"; \
+	elif command -v ee-gcc-ar >/dev/null 2>&1; then \
+		command -v ee-gcc-ar; \
+	else \
+		echo "$(EE_AR)"; \
+	fi)
+
+
+
 EE_CC ?= $(shell if command -v ee-gcc >/dev/null 2>&1; then echo ee-gcc; elif command -v mips64r5900el-ps2-elf-gcc >/dev/null 2>&1; then echo mips64r5900el-ps2-elf-gcc; elif [ -x "$(PS2DEV)/ee/bin/ee-gcc" ]; then echo "$(PS2DEV)/ee/bin/ee-gcc"; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-gcc" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-gcc"; fi)
 EE_CXX ?= $(shell if command -v ee-g++ >/dev/null 2>&1; then echo ee-g++; elif command -v mips64r5900el-ps2-elf-g++ >/dev/null 2>&1; then echo mips64r5900el-ps2-elf-g++; elif [ -x "$(PS2DEV)/ee/bin/ee-g++" ]; then echo "$(PS2DEV)/ee/bin/ee-g++"; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-g++" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-g++"; fi)
+EE_AR ?= $(shell if command -v ee-ar >/dev/null 2>&1; then echo ee-ar; elif command -v mips64r5900el-ps2-elf-ar >/dev/null 2>&1; then echo mips64r5900el-ps2-elf-ar; elif [ -x "$(PS2DEV)/ee/bin/ee-ar" ]; then echo "$(PS2DEV)/ee/bin/ee-ar"; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ar" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ar"; fi)
 EE_STRIP ?= $(shell if command -v ee-strip >/dev/null 2>&1; then echo ee-strip; elif command -v mips64r5900el-ps2-elf-strip >/dev/null 2>&1; then echo mips64r5900el-ps2-elf-strip; elif [ -x "$(PS2DEV)/ee/bin/ee-strip" ]; then echo "$(PS2DEV)/ee/bin/ee-strip"; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-strip" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-strip"; fi)
 # ps2-packer is Pixel's LZMA self-extracting ELF packer
 # (https://github.com/ps2dev/ps2-packer, shipped with ps2dev/ps2dev).
@@ -82,11 +232,36 @@ SNES_OBJ_CACHE ?= 1
 # continua disponivel somente para comparacao A/B.
 SNES_BG_CACHE ?= 0
 
-# Safe host recovery: after a missed VBlank, execute the missing emulated
-# frame(s) without redrawing them before producing the next visible frame.
-# Audio/input/CPU/HDMA remain at full rate while presentation catches up.
-SNES_SAFE_FRAMESKIP ?= 1
-SNES_MAX_CATCHUP_FRAMES ?= 3
+# Cache H-flip 4bpp para reduzir trabalho repetido em sprites
+SNES_CHR_HFLIP_CACHE ?= 0
+
+# AURORA_HVIRQ_RESCHEDULE_V4
+# Re-arm H/V timer events when $4200/$4207-$420A change mid-scanline.
+# Set to 0 for an exact legacy scheduler A/B build.
+SNES_HVIRQ_RESCHEDULE ?= 1
+
+# AURORA_ROM_COMPAT_DB_V6
+# CRC-gated in-memory ROM workarounds. No file on disk is modified.
+# REGIONAL=0 keeps only payloads documented directly for the source region.
+SNES_ROM_COMPAT_PATCHES ?= 0
+SNES_ROM_COMPAT_REGIONAL ?= 0
+
+# AURORA_SONIC_COLOR_V7
+# CRC-gated Sonic Blast Man color-math workaround; set 0 for A/B testing.
+SNES_SONIC_COLOR_WORKAROUND ?= 0
+
+# AURORA_CRC_ZERO_INIT_V8
+# Exact-CRC cold-boot compatibility. Selected SNES titles reproduce the
+# ReyFxck/SNESticleRevive cold boot: WRAM=0x00 and SRAM backing=0x00.
+# Existing .srm files are still loaded later and overwrite this initial state.
+# Set to 0 for an A/B build using Aurora's random WRAM + 0xFF fresh SRAM.
+SNES_CRC_ZERO_INIT ?= 0
+
+# AURORA_HK97_SPC_BOOT_V9
+# Hong Kong '97 only: let the SPC700 IPL naturally reach its AA/BB boot
+# handshake before the S-CPU starts. Exact CRC32 gate, disabled with =0.
+# AURORA_HK97_SPC_PREWARM_DEFAULT_OFF_V4_20260822
+SNES_HK97_SPC_BOOT ?= 0
 
 # Conservative flags to bridge the GCC 3.2 (2003) -> GCC 15.1 (2025)
 # gap in default optimization behavior. The original iaddis source was
@@ -113,27 +288,63 @@ CONSERVATIVE_FLAGS := \
 	-fwrapv \
 	-fsigned-char
 
-# Force UTF-8 for source input and string constants.  All Chinese UI text
-# lives in hex-escaped UTF-8 literals (\xe5\xa4\x8d...), so the escapes are
-# raw bytes either way; the flags guarantee iconv never re-interprets them
-# and make any future raw UTF-8 literal/comment unambiguous.
-CHARSET_FLAGS := -finput-charset=UTF-8 -fexec-charset=UTF-8
-
-CFLAGS := -G0 -O2 -Wall $(CONSERVATIVE_FLAGS) $(CHARSET_FLAGS) \
+# AURORA_V7_SAFE_BUILD_FLAGS
+# -pipe changes only compiler temporary-file plumbing; -fomit-frame-pointer
+# is semantics-preserving here and frees one register on the EE hot paths.
+# Deliberately no -O3, fast-math, LTO or renewed auto-vectorization.
+CFLAGS := -G0 -O2 -pipe -fomit-frame-pointer -Wall $(CONSERVATIVE_FLAGS) \
 	-D_EE -DPS2 -DLSB_FIRST -DALIGN_DWORD -DCODE_PLATFORM=3 \
 	-DSNDBG_LOG=$(SNES_DIAG_ENABLED) -DSNDBG_DEEP=$(SNES_DIAG_DEEP) \
 	-DSNPPU_OBJ_CACHE=$(SNES_OBJ_CACHE) \
 	-DSNPPU_BG_CACHE=$(SNES_BG_CACHE) \
-	-DSNESTICLE_SAFE_FRAMESKIP=$(SNES_SAFE_FRAMESKIP) \
-	-DSNESTICLE_MAX_CATCHUP_FRAMES=$(SNES_MAX_CATCHUP_FRAMES)
+	-DSNPPU_CHR_CACHE_HFLIP=$(SNES_CHR_HFLIP_CACHE) \
+	-DSNES_HVIRQ_RESCHEDULE=$(SNES_HVIRQ_RESCHEDULE) \
+	-DSNES_ROM_COMPAT_PATCHES=$(SNES_ROM_COMPAT_PATCHES) \
+	-DSNES_ROM_COMPAT_REGIONAL=$(SNES_ROM_COMPAT_REGIONAL) \
+	-DSNES_SONIC_COLOR_WORKAROUND=$(SNES_SONIC_COLOR_WORKAROUND) \
+	-DSNES_CRC_ZERO_INIT=$(SNES_CRC_ZERO_INIT) \
+	-DSNES_HK97_SPC_BOOT=$(SNES_HK97_SPC_BOOT)
 
-CXXFLAGS := -G0 -O2 -Wall $(CONSERVATIVE_FLAGS) -Wno-narrowing -Wno-overflow -fno-exceptions -fno-rtti -fpermissive $(CHARSET_FLAGS) \
+CXXFLAGS := -G0 -O2 -pipe -fomit-frame-pointer -Wall $(CONSERVATIVE_FLAGS) -Wno-narrowing -Wno-overflow -fno-exceptions -fno-rtti -fpermissive \
 	-D_EE -DPS2 -DLSB_FIRST -DALIGN_DWORD -DCODE_PLATFORM=3 \
 	-DSNDBG_LOG=$(SNES_DIAG_ENABLED) -DSNDBG_DEEP=$(SNES_DIAG_DEEP) \
 	-DSNPPU_OBJ_CACHE=$(SNES_OBJ_CACHE) \
 	-DSNPPU_BG_CACHE=$(SNES_BG_CACHE) \
-	-DSNESTICLE_SAFE_FRAMESKIP=$(SNES_SAFE_FRAMESKIP) \
-	-DSNESTICLE_MAX_CATCHUP_FRAMES=$(SNES_MAX_CATCHUP_FRAMES)
+	-DSNPPU_CHR_CACHE_HFLIP=$(SNES_CHR_HFLIP_CACHE) \
+	-DSNES_HVIRQ_RESCHEDULE=$(SNES_HVIRQ_RESCHEDULE) \
+	-DSNES_ROM_COMPAT_PATCHES=$(SNES_ROM_COMPAT_PATCHES) \
+	-DSNES_ROM_COMPAT_REGIONAL=$(SNES_ROM_COMPAT_REGIONAL) \
+	-DSNES_SONIC_COLOR_WORKAROUND=$(SNES_SONIC_COLOR_WORKAROUND) \
+	-DSNES_CRC_ZERO_INIT=$(SNES_CRC_ZERO_INIT) \
+	-DSNES_HK97_SPC_BOOT=$(SNES_HK97_SPC_BOOT)
+
+# AURORA_MEGA_V4_SAFE_HOT_COMPILE
+# Keep the project's global -O2 + CONSERVATIVE_FLAGS contract.  Only ask GCC
+# to inline more aggressively inside pure computational translation units;
+# do not enable -O3's loop transforms globally and do not touch GIF/GS/DMA I/O.
+# AURORA_SNES9X2010_V4_PS2_PERF_20260824
+# AURORA_SNES9X2010_V5_ALLCORES_PERF_20260824
+# Exact all-core hot paths; no timing or approximation switches.
+# Safe host-bridge inlining for PicoDrive, Beetle PCE Fast and SNES9x.
+AURORA_SAFE_HOT_CXXFLAGS := -finline-functions -finline-small-functions -findirect-inlining
+AURORA_SAFE_HOT_OBJS = \
+	$(OBJ_DIR)/snes/ppu/snppurender8.o \
+	$(OBJ_DIR)/snes/ppu/snppubg.o \
+	$(OBJ_DIR)/snes/ppu/snppuobj.o \
+	$(OBJ_DIR)/snes/core/sngsu.o \
+	$(OBJ_DIR)/snes/apu/snspcmix.o \
+	$(OBJ_DIR)/nes/quicknes/quicknes_bridge.o \
+	$(OBJ_DIR)/sega/picodrive/picodrive_bridge.o \
+	$(OBJ_DIR)/pce/beetle/pce_bridge.o \
+	$(OBJ_DIR)/snes/snes9x2010/snes9x2010_bridge.o \
+	$(OBJ_DIR)/common/render/audmixbuffer.o \
+	$(OBJ_DIR)/snes/core/snes.o \
+	$(OBJ_DIR)/snes/core/sndma.o \
+	$(OBJ_DIR)/snes/ppu/snppu.o \
+	$(OBJ_DIR)/snes/ppu/snppurender.o
+$(AURORA_SAFE_HOT_OBJS): CXXFLAGS += $(AURORA_SAFE_HOT_CXXFLAGS)
+# Makefile changes to the target-specific flags must invalidate these objects.
+$(AURORA_SAFE_HOT_OBJS): Makefile
 
 # The official libxmp-lite embedded/core configuration keeps the MOD/XM effect
 # and loop engines while omitting desktop-only depackers and format extras,
@@ -146,7 +357,7 @@ CXXFLAGS += -DLIBXMP_CORE_PLAYER
 # sem numero ou APP_VERSION=x.y.z para testar uma versao futura.
 # __DATE__/__TIME__ pegariam UTC (3h adiantado no Brasil); por isso a
 # data/hora vem do Makefile com TZ fixo de Brasilia.
-APP_VERSION ?= 1.0.7
+APP_VERSION ?= 1.0.0
 ifeq ($(strip $(APP_VERSION)),)
 VER_SUFFIX      :=
 APP_VERSION_DEF :=
@@ -154,7 +365,7 @@ else
 VER_SUFFIX      := _v$(APP_VERSION)
 APP_VERSION_DEF := -DAPP_VERSION=\"$(APP_VERSION)\"
 endif
-ELF_OUT_NAME := SNESticle_Revive$(VER_SUFFIX)
+ELF_OUT_NAME := SNESticle_Aurora$(VER_SUFFIX)
 BUILD_DATE   := $(shell TZ='America/Sao_Paulo' date '+%Y-%m-%d')
 BUILD_TIME   := $(shell TZ='America/Sao_Paulo' date '+%H:%M:%S')
 VERSION_DEFS := $(APP_VERSION_DEF) -DBUILD_DATE=\"$(BUILD_DATE)\" -DBUILD_TIME=\"$(BUILD_TIME)\"
@@ -300,7 +511,18 @@ INCS := \
 	-I$(PS2SDK)/common/include \
 	-I$(PS2SDK)/ee/include \
 	-I$(PS2SDK)/ports/include \
-	-I$(GSKIT)/include
+	-I$(GSKIT)/include \
+	-I$(QUICKNES_INC) \
+	-I$(QUICKNES_NATIVE_INC) \
+	-I$(FCEUMM_FDS_LIBRETRO_INC) \
+	-I$(PICODRIVE_INC) \
+	-I$(PICODRIVE_DIR) \
+	-I$(SRC_DIR)/sega/system \
+	-I$(SRC_DIR)/sega/picodrive \
+	-I$(SRC_DIR)/pce/system \
+	-I$(SRC_DIR)/pce/beetle \
+	-I$(SRC_DIR)/snes/snes9x2010 \
+	-I$(SNES9X2010_INC)
 
 LIBDIRS := \
 	-L$(PS2SDK)/ee/lib \
@@ -327,14 +549,17 @@ LIBS := \
 	-lgskit -ldmakit -lgskit_toolkit \
 	-lps2_drivers \
 	-lpoweroff -lfileXio -lcdvd \
-	-lmc -lpad -lnetman -lps2ip \
+	-lmc -lpad -lnetman -lps2ips \
 	-laudsrv \
+	-lelf-loader \
 	-lpatches \
 	-lcglue \
 	-ldebug -lkernel -lc -lm -lstdc++ -lgcc
 
+# AURORA_SWC_FLOPPY_V1_20260831: isolated SWC source
 SRCS := \
     src/platform/ps2/ps2sdk_stubs.c \
+    src/platform/ps2/system/cdda_async_filexio.c \
 	src/common/media/bmpfile.cpp \
 	src/platform/ps2/cdvd/cd.c \
 	src/modules/cdvd/cdvd_rpc.c \
@@ -347,7 +572,7 @@ SRCS := \
 	src/common/base/file.cpp \
 	src/common/base/font_ui.cpp \
 	src/common/base/font.cpp \
-	src/common/base/font_cjk_data.cpp \
+	src/common/base/font_cjk.cpp \
 	src/platform/ps2/gs/gpfifo.c \
 	src/platform/ps2/gs/gpprim.c \
 	src/platform/ps2/gs/gs.c \
@@ -436,6 +661,7 @@ SRCS := \
 	src/snes/core/snio.cpp \
 	src/snes/core/snmask128.cpp \
 	src/snes/core/snmemmap.cpp \
+	src/snes/core/snswc.cpp \
 	src/snes/ppu/snppubg.cpp \
 	src/snes/ppu/snppublend_gs.cpp \
 	src/snes/ppu/snppucolor.cpp \
@@ -485,22 +711,31 @@ SRCS := \
 	src/platform/ps2/system/mainloop_bgm.cpp \
 	src/platform/ps2/system/global_alloc.cpp \
 	src/platform/ps2/system/embedded_irx.cpp \
-	src/third_party/nes_snd_emu/Blip_Buffer.cpp \
-	src/third_party/nes_snd_emu/Nes_Apu.cpp \
-	src/third_party/nes_snd_emu/Nes_Oscs.cpp \
-	src/nes/core/InfoNES.cpp \
-	src/nes/cpu/K6502.cpp \
-	src/nes/apu/InfoNES_pAPU.cpp \
-	src/nes/mapper/InfoNES_Mapper.cpp \
-	src/nes/system/InfoNES_System_PS2.cpp \
 	src/nes/system/nesrom.cpp \
-	src/nes/system/nessystem.cpp
+	src/nes/quicknes/quicknes_bridge.cpp \
+	src/nes/quicknes/nessystem_quicknes.cpp \
+	src/nes/fceumm/fceumm_fds_bridge.cpp \
+	src/nes/fceumm/fdssystem.cpp \
+	src/sega/system/segarom.cpp \
+	src/sega/picodrive/picodrive_bridge.cpp \
+	src/sega/picodrive/segasystem_picodrive.cpp \
+	src/pce/system/pcerom.cpp \
+	src/pce/beetle/pce_bridge.cpp \
+	src/pce/beetle/pcesystem_beetle.cpp \
+	src/snes/snes9x2010/snes9x2010rom.cpp \
+	src/snes/snes9x2010/snes9x2010_bridge.cpp \
+	src/snes/snes9x2010/snes9x2010system.cpp
 
 OBJS := \
 	$(patsubst src/%.c,$(OBJ_DIR)/%.o,$(filter %.c,$(SRCS))) \
 	$(patsubst src/%.cpp,$(OBJ_DIR)/%.o,$(filter %.cpp,$(SRCS))) \
 	$(patsubst src/%.s,$(OBJ_DIR)/%.o,$(filter %.s,$(SRCS))) \
 	$(patsubst src/%.S,$(OBJ_DIR)/%.o,$(filter %.S,$(SRCS)))
+
+# AURORA_V7_MAKEFILE_REBUILDS_OBJECTS
+# Compiler flags live in this Makefile.  Make every main object depend on it
+# so changing flags causes a rebuild even when the user simply runs `make -j8`.
+$(OBJS): Makefile
 
 # Rastreamento de dependencia de headers.  -MMD faz o compilador gerar um
 # .d por objeto listando os headers que ele inclui; -MP adiciona alvos
@@ -559,7 +794,7 @@ SDK_EXTRA_IRX := ioptrap.irx poweroff.irx
 # The legacy iaddis CDVD.IRX is also no longer needed. The in-tree
 # cdfs_stream.irx registers cdfs: and streams directories instead of using
 # PS2SDK cdfs.irx's fixed 256-entry table.
-EMBED_IRX_NAMES := audsrv freesd sio2man mcman mcserv padman mtapman ps2dev9 netman smap ps2ip smbman cdfs_stream usbd bdm bdmfs_fatfs usbmass_bd ps2atad ps2hdd mmceman mx4sio_bd usbhdfsd
+EMBED_IRX_NAMES := audsrv freesd sio2man mcman mcserv padman mtapman ps2dev9 netman smap ps2ip ps2ips smbman cdfs_stream usbd ps2mouse bdm bdmfs_fatfs usbmass_bd ps2atad ps2hdd atad_bd mmceman mx4sio_bd
 
 # Pin the complete SIO2 storage/input group to one verified PS2SDK revision.
 # This prevents a future SDK update from mixing an incompatible sio2man with
@@ -594,7 +829,8 @@ FREESD_IRX_PATH  ?= $(PS2SDK)/iop/irx/freesd.irx
 PS2DEV9_IRX_PATH ?= $(PS2SDK)/iop/irx/ps2dev9.irx
 NETMAN_IRX_PATH  ?= $(PS2SDK)/iop/irx/netman.irx
 SMAP_IRX_PATH    ?= $(PS2SDK)/iop/irx/smap.irx
-PS2IP_IRX_PATH   ?= $(PS2SDK)/iop/irx/ps2ip.irx
+PS2IP_IRX_PATH   ?= $(PS2SDK)/iop/irx/ps2ip-nm.irx
+PS2IPS_IRX_PATH  ?= $(PS2SDK)/iop/irx/ps2ips.irx
 
 # Stack BDM moderna (USB + FAT/exFAT/GPT).  Mantenha os quatro modulos
 # FIXADOS juntos: depender do $(PS2SDK) de quem compilava misturava revisoes
@@ -602,22 +838,22 @@ PS2IP_IRX_PATH   ?= $(PS2SDK)/iop/irx/ps2ip.irx
 # reais.  usbd_mini e' o FreeUsbd compativel usado pelo OPL para BDM.  Os
 # caminhos continuam substituiveis na linha de comando para testes de driver.
 USBD_IRX_PATH        ?= $(CURDIR)/irx/usbd_mini.irx
+AURORA_PS2MOUSE_DIR  ?= $(CURDIR)/src/platform/ps2/iop/aurora_ps2mouse
+PS2MOUSE_IRX_PATH    ?= $(AURORA_PS2MOUSE_DIR)/aurora_ps2mouse.irx
 BDM_IRX_PATH         ?= $(CURDIR)/irx/bdm.irx
 BDMFS_FATFS_IRX_PATH ?= $(CURDIR)/irx/bdmfs_fatfs.irx
 USBMASS_BD_IRX_PATH  ?= $(CURDIR)/irx/usbmass_bd.irx
-# ATA-Assault (saildot4k/ATA-Assault): ATA block-device TRANSPORT for the
-# BDM core already running above.  Exposes the internal PATA HDD as a
-# massN: device, supporting FAT16/FAT32/exFAT with MBR or GPT partition
-# tables (mirrors the modern OPL ATA-BDM layout).  The matching ATA-Assault
-# bundled BDM+BDMFS usbd.irx is NOT used; we keep it in irx/ only for
-# reference.  ATA-Assault and the legacy APA ps2atad+ps2hdd stack own the
-# same ATA hardware, so at runtime the two HDD modes are mutually exclusive
-# and the UI enforces that when toggling either option.
-USBHDFSD_IRX_PATH    ?= $(CURDIR)/irx/usbhdfsd.irx
+# ATA block device para BDM: expoe o HD INTERNO (FAT/exFAT) como um massN:,
+# igual ao OPL moderno.  Usa o ps2dev9.irx (ja' embutido) como barramento.
 # HD interno formato APA (igual HDD-OSD/OPL): ps2atad (ATA) + ps2hdd
 # (expoe hdd0:), sobre o ps2dev9.irx ja' embutido.
 PS2ATAD_IRX_PATH     ?= $(PS2SDK)/iop/irx/ps2atad.irx
 PS2HDD_IRX_PATH      ?= $(PS2SDK)/iop/irx/ps2hdd.irx
+# atad_bd: mesmo ATAD do PS2SDK (f08e889f) compilado com ATA_ENABLE_BDM=1.
+# Registra o HD interno como block device BDM "ata" -> bdmfs_fatfs monta
+# FAT/exFAT em ata0:/ata1:. MUTUAMENTE EXCLUSIVO com a pilha APA acima
+# (ambos registram a library atad 1.3 no IOP; so' um pode carregar).
+ATAD_BD_IRX_PATH     ?= $(CURDIR)/irx/atad_bd.irx
 # PS2FS_IRX_PATH definido acima (bloco opcional HAVE_PS2FS).
 
 .PHONY: all clean strip list count package package-irx check-env packed elf fix-packer fast serial turbo rebuild-fast help covers ensure-ps2sdk install-ps2sdk ps2sdk-env ensure-ps2dev install-ps2dev-tar ps2dev-env build-begin build-summary copy-output iso-build-image ensure-ps2-packer install-ps2-packer ensure-iso-tool install-iso-tool ensure-local-ps2-packer
@@ -637,10 +873,11 @@ check-env: ensure-ps2dev
 	@test -f "$(CDFS_STREAM_IRX_PATH)" || (echo "ERROR: required streaming CDFS IRX not found: $(CDFS_STREAM_IRX_PATH)"; exit 1)
 	@test -f "$(SMBMAN_IRX_PATH)" || (echo "ERROR: required SMB filesystem IRX not found: $(SMBMAN_IRX_PATH)"; exit 1)
 	@test -f "$(USBD_IRX_PATH)" || (echo "ERROR: required FreeUsbd mini IRX not found: $(USBD_IRX_PATH)"; exit 1)
+	@test -f "$(PS2MOUSE_IRX_PATH)" || (echo "ERROR: required PS2 USB mouse IRX not found: $(PS2MOUSE_IRX_PATH)"; exit 1)
 	@test -f "$(BDM_IRX_PATH)" || (echo "ERROR: required BDM IRX not found: $(BDM_IRX_PATH)"; exit 1)
 	@test -f "$(BDMFS_FATFS_IRX_PATH)" || (echo "ERROR: required FAT/exFAT IRX not found: $(BDMFS_FATFS_IRX_PATH)"; exit 1)
 	@test -f "$(USBMASS_BD_IRX_PATH)" || (echo "ERROR: required USB mass IRX not found: $(USBMASS_BD_IRX_PATH)"; exit 1)
-	@test -f "$(USBHDFSD_IRX_PATH)" || (echo "ERROR: required ATA-Assault ATA→BDM transport IRX not found: $(USBHDFSD_IRX_PATH)"; exit 1)
+	@test -f "$(ATAD_BD_IRX_PATH)" || (echo "ERROR: required ATA BDM IRX not found: $(ATAD_BD_IRX_PATH)"; exit 1)
 
 $(OBJ_DIR):
 	@mkdir -p "$(OBJ_DIR)"
@@ -656,9 +893,7 @@ FORCE_COMPILE_MODE:
 
 $(BUILD_CONFIG_FILE): FORCE_COMPILE_MODE | $(OBJ_DIR)
 	@mkdir -p "$(BUILD_META_DIR)"; \
-	mode='SNES_DIAGNOSTICS=$(SNES_DIAGNOSTICS) SNES_OBJ_CACHE=$(SNES_OBJ_CACHE) SNES_BG_CACHE=$(SNES_BG_CACHE) SNES_SAFE_FRAMESKIP=$(SNES_SAFE_FRAMESKIP) SNES_MAX_CATCHUP_FRAMES=$(SNES_MAX_CATCHUP_FRAMES) PROFILE=$(PROFILE) DSP4_CAPTURE=$(DSP4_CAPTURE) DSP4_STUB=$(DSP4_STUB)'; \
-	mode="$$mode CXX=$(CXXFLAGS)"; \
-	mode="$$mode CC=$(CFLAGS)"; \
+	mode='SNES_DIAGNOSTICS=$(SNES_DIAGNOSTICS) SNES_OBJ_CACHE=$(SNES_OBJ_CACHE) SNES_BG_CACHE=$(SNES_BG_CACHE) SNES_CHR_HFLIP_CACHE=$(SNES_CHR_HFLIP_CACHE) PROFILE=$(PROFILE) DSP4_CAPTURE=$(DSP4_CAPTURE) DSP4_STUB=$(DSP4_STUB)'; \
 	if [ ! -f "$@" ] || [ "$$(cat "$@")" != "$$mode" ]; then \
 		printf '%s\n' "$$mode" > "$@"; \
 	fi
@@ -695,12 +930,36 @@ $(EMBED_DIR)/smap_irx.h: $(SMAP_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,smap_irx)
 $(EMBED_DIR)/ps2ip_irx.h: $(PS2IP_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,ps2ip_irx)
+$(EMBED_DIR)/ps2ips_irx.h: $(PS2IPS_IRX_PATH) | $(EMBED_DIR)
+	$(call RUN_BIN2C,$<,$@,ps2ips_irx)
 $(EMBED_DIR)/smbman_irx.h: $(SMBMAN_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,smbman_irx)
 $(EMBED_DIR)/cdfs_stream_irx.h: $(CDFS_STREAM_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,cdfs_stream_irx)
 $(EMBED_DIR)/usbd_irx.h: $(USBD_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,usbd_irx)
+# AURORA_COMPOSITE_MOUSE_V1
+AURORA_PS2MOUSE_SOURCES := \
+	$(AURORA_PS2MOUSE_DIR)/Makefile \
+	$(AURORA_PS2MOUSE_DIR)/ps2mouse.c \
+	$(AURORA_PS2MOUSE_DIR)/ps2mouse.h \
+	$(AURORA_PS2MOUSE_DIR)/imports.lst \
+	$(AURORA_PS2MOUSE_DIR)/irx_imports.h
+
+$(PS2MOUSE_IRX_PATH): ensure-ps2dev $(AURORA_PS2MOUSE_SOURCES)
+	PATH="$(PS2DEV)/iop/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) -C $(AURORA_PS2MOUSE_DIR) PS2SDK="$(PS2SDK)" all
+
+# Build the local mouse IRX before the existing check-env recipe tests it.
+check-env: $(PS2MOUSE_IRX_PATH)
+
+.PHONY: aurora-ps2mouse-clean
+aurora-ps2mouse-clean:
+	$(MAKE) -C $(AURORA_PS2MOUSE_DIR) PS2SDK="$(PS2SDK)" clean
+
+clean: aurora-ps2mouse-clean
+
+$(EMBED_DIR)/ps2mouse_irx.h: $(PS2MOUSE_IRX_PATH) | $(EMBED_DIR)
+	$(call RUN_BIN2C,$<,$@,ps2mouse_irx)
 $(EMBED_DIR)/bdm_irx.h: $(BDM_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,bdm_irx)
 $(EMBED_DIR)/bdmfs_fatfs_irx.h: $(BDMFS_FATFS_IRX_PATH) | $(EMBED_DIR)
@@ -711,14 +970,14 @@ $(EMBED_DIR)/ps2atad_irx.h: $(PS2ATAD_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,ps2atad_irx)
 $(EMBED_DIR)/ps2hdd_irx.h: $(PS2HDD_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,ps2hdd_irx)
+$(EMBED_DIR)/atad_bd_irx.h: $(ATAD_BD_IRX_PATH) | $(EMBED_DIR)
+	$(call RUN_BIN2C,$<,$@,atad_bd_irx)
 $(EMBED_DIR)/ps2fs_irx.h: $(PS2FS_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,ps2fs_irx)
 $(EMBED_DIR)/mmceman_irx.h: $(MMCEMAN_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,mmceman_irx)
 $(EMBED_DIR)/mx4sio_bd_irx.h: $(MX4SIO_BD_IRX_PATH) | $(EMBED_DIR)
 	$(call RUN_BIN2C,$<,$@,mx4sio_bd_irx)
-$(EMBED_DIR)/usbhdfsd_irx.h: $(USBHDFSD_IRX_PATH) | $(EMBED_DIR)
-	$(call RUN_BIN2C,$<,$@,usbhdfsd_irx)
 
 # embedded_irx.cpp #includes the generated headers, so make sure they
 # exist before that file is compiled.
@@ -749,7 +1008,11 @@ define RUN_LINK
 	@log="$(OBJ_DIR)/.logs/link_$(notdir $(1)).log"; \
 	name=$$(basename "$(1)"); \
 	start=$$(date +%s%N); \
-	if $(2) > "$$log" 2>&1; then rc=0; else rc=$$?; fi; \
+	printf "[ LD    ] %-23s [ linking/LTO ... ]\n" "$$name"; \
+	$(2) -v > "$$log" 2>&1 & pid=$$!; \
+	tail -n +1 -f --pid=$$pid "$$log" & tailpid=$$!; \
+	if wait $$pid; then rc=0; else rc=$$?; fi; \
+	wait $$tailpid 2>/dev/null || true; \
 	end=$$(date +%s%N); \
 	elapsed=$$(awk "BEGIN { printf \"%.2f\", ($$end - $$start) / 1000000000 }"); \
 	reset=""; green=""; yellow=""; red=""; \
@@ -816,8 +1079,110 @@ $(OBJ_DIR)/%.o: src/%.s | $(OBJ_DIR)
 	$(call RUN_COMPILE,AS,$<,$(EE_CC) $(CFLAGS) $(DEPFLAGS) $(INCS) -c "$<" -o "$@")
 $(OBJ_DIR)/%.o: src/%.S | $(OBJ_DIR)
 	$(call RUN_COMPILE,AS,$<,$(EE_CC) $(CFLAGS) $(DEPFLAGS) $(INCS) -c "$<" -o "$@")
-$(TARGET): $(OBJS) | $(OBJ_DIR)
-	$(call RUN_LINK,$@,$(EE_CXX) -o "$@" $(OBJS) $(LIBDIRS) $(LIBS))
+# SNESTICLE_QUICKNES_ALWAYS_SUBMAKE
+.PHONY: FORCE_QUICKNES
+FORCE_QUICKNES:
+
+$(QUICKNES_LIB): FORCE_QUICKNES
+	@echo "[ QuickNES ] Building PS2 static core"
+	@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" \
+	$(MAKE) -C "$(QUICKNES_DIR)" \
+		platform=ps2 \
+		PS2DEV="$(PS2DEV)" \
+		PS2SDK="$(PS2SDK)" \
+		all
+
+
+
+.PHONY: FORCE_PICODRIVE
+FORCE_PICODRIVE:
+
+$(PICODRIVE_LIB): FORCE_PICODRIVE
+	@printf '[ PicoDrive ] building PS2 static core\n'
+	@$(MAKE) -C "$(PICODRIVE_DIR)" -f Makefile.libretro \
+		platform=ps2 CC="$(EE_CC) $(PICODRIVE_PS2_SAFE_FLAGS) $(PICODRIVE_OPLL_NS_FLAGS)" AR="$(PICODRIVE_AR)" PS2DEV="$(PS2DEV)" PS2SDK="$(PS2SDK)" use_libchdr=0 STATIC_LINKING=0 STATIC_LINKING_LINK=1 all
+
+# AURORA_PCE_INCREMENTAL_BUILD_V1_20260824
+# AURORA_PCE_INCREMENTAL_BUILD_V1_MAKEFIX_20260824
+# Always enter Beetle's own Makefile so it can inspect source/header
+# timestamps. The sub-make is incremental; critically, there is NO `clean`.
+# Keep the recursive make invocation on one physical recipe line to avoid
+# Makefile continuation/prefix ambiguities.
+.PHONY: FORCE_PCE_INCREMENTAL
+FORCE_PCE_INCREMENTAL:
+
+$(PCE_RAW_LIB): FORCE_PCE_INCREMENTAL $(PCE_PS2_MAKEFILE)
+	@printf '[ Beetle PCE Fast ] checking incremental PS2 core\n'
+	@test -f "$(PCE_DIR)/Makefile" || { echo "ERROR: missing $(PCE_DIR)"; exit 1; }
+	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(PCE_DIR)" -f "$(PCE_PS2_MAKEFILE)" CC="$(EE_CC)" CXX="$(EE_CXX)" AR="$(EE_AR)" all
+
+$(PCE_LIB): $(PCE_RAW_LIB) $(PCE_NAMESPACE_TOOL)
+	@printf '[ Beetle PCE Fast ] namespacing embedded libretro core\n'
+	@$(PCE_PYTHON) "$(PCE_NAMESPACE_TOOL)" --nm "$(PCE_NM)" --objcopy "$(PCE_OBJCOPY)" --ranlib "$(PCE_RANLIB)" --raw "$(PCE_RAW_LIB)" --output "$(PCE_LIB)"
+
+.PHONY: pce-core
+pce-core: $(PCE_LIB)
+	@echo "[ Beetle PCE Fast ] core ready: $(PCE_LIB)"
+	@$(PCE_NM) -g --defined-only "$(PCE_LIB)" | grep -E 'PCE_retro_(init|load_game|run|serialize)' | head -20
+
+# AURORA_FCEUMM_FDS_V0_6_RULES_BEGIN
+# Always enter the external core Makefile. It is incremental and creates all
+# objects/archives under build/fceumm-fds, outside the pinned FCEUmm checkout.
+.PHONY: FORCE_FCEUMM_FDS_INCREMENTAL
+FORCE_FCEUMM_FDS_INCREMENTAL:
+
+$(FCEUMM_FDS_RAW_LIB): FORCE_FCEUMM_FDS_INCREMENTAL $(FCEUMM_FDS_PS2_MAKEFILE) $(FCEUMM_FDS_PREPARE_TOOL) $(FCEUMM_FDS_CORE_DEPS)
+	@printf '[ FCEUmm FDS ] checking lean FDS-only/two-pad PS2 core\n'
+	@test -f "$(FCEUMM_FDS_DIR)/src/fds.c" || { echo "ERROR: missing FCEUmm checkout: $(FCEUMM_FDS_DIR)"; exit 1; }
+	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(FCEUMM_FDS_DIR)" -f "$(FCEUMM_FDS_PS2_MAKEFILE)" PS2DEV="$(PS2DEV)" PS2SDK="$(PS2SDK)" CC="$(EE_CC)" AR="$(EE_AR)" RANLIB="$(FCEUMM_FDS_RANLIB)" PYTHON="$(FCEUMM_FDS_PYTHON)" all # AURORA_FCEUMM_FDS_V0_6_10_PS2SDK_INCLUDE_FIX
+
+$(FCEUMM_FDS_LIB): $(FCEUMM_FDS_RAW_LIB) $(FCEUMM_FDS_NAMESPACE_TOOL)
+	@printf '[ FCEUmm FDS ] namespacing embedded libretro core\n'
+	@$(FCEUMM_FDS_PYTHON) "$(FCEUMM_FDS_NAMESPACE_TOOL)" --nm "$(FCEUMM_FDS_NM)" --objcopy "$(FCEUMM_FDS_OBJCOPY)" --ranlib "$(FCEUMM_FDS_RANLIB)" --raw "$(FCEUMM_FDS_RAW_LIB)" --output "$(FCEUMM_FDS_LIB)"
+
+.PHONY: fceumm-fds-core fceumm-fds-clean
+fceumm-fds-core: $(FCEUMM_FDS_LIB)
+	@echo "[ FCEUmm FDS ] runtime-ready lean core: $(FCEUMM_FDS_LIB)"
+	@$(FCEUMM_FDS_NM) -g --defined-only "$(FCEUMM_FDS_LIB)" | grep -E 'FDS_(retro_(init|load_game|run|serialize|serialize_size|unserialize)|FCEU_FDS(Eject|Select|Insert)|aurora_fds_set_system_directory)' | head -30
+
+fceumm-fds-clean:
+	@rm -rf "$(FCEUMM_FDS_BUILD_DIR)"
+# AURORA_FCEUMM_FDS_V0_6_RULES_END
+
+# AURORA_SNES9X2010_V1
+$(SNES9X2010_RAW_LIB): $(SNES9X2010_PS2_MAKEFILE) $(SNES9X2010_CORE_DEPS)
+	@printf '[ Snes9x 2010 ] updating raw PS2 static core\n'
+	@test -f "$(SNES9X2010_DIR)/build/Makefile.common" || { echo "ERROR: missing $(SNES9X2010_DIR)"; exit 1; }
+	@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) -C "$(SNES9X2010_DIR)" -f "$(SNES9X2010_PS2_MAKEFILE)" CC="$(EE_CC)" AR="$(EE_AR)" all
+
+$(SNES9X2010_LIB): $(SNES9X2010_RAW_LIB) $(SNES9X2010_NAMESPACE_TOOL)
+	@printf '[ Snes9x 2010 ] namespacing embedded libretro core\n'
+	@$(SNES9X2010_PYTHON) "$(SNES9X2010_NAMESPACE_TOOL)" --nm "$(SNES9X2010_NM)" --objcopy "$(SNES9X2010_OBJCOPY)" --ranlib "$(SNES9X2010_RANLIB)" --raw "$(SNES9X2010_RAW_LIB)" --output "$(SNES9X2010_LIB)"
+
+.PHONY: snes9x2010-core snes9x2010-clean
+snes9x2010-core: $(SNES9X2010_LIB)
+	@echo "[ Snes9x 2010 ] core ready: $(SNES9X2010_LIB)"
+	@$(SNES9X2010_NM) -g --defined-only "$(SNES9X2010_LIB)" | grep -E 'S9X2010_retro_(init|load_game|run|serialize)' | head -20
+
+snes9x2010-clean:
+	@if [ -d "$(SNES9X2010_DIR)" ]; then PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) -C "$(SNES9X2010_DIR)" -f "$(SNES9X2010_PS2_MAKEFILE)" CC="$(EE_CC)" AR="$(EE_AR)" clean || true; fi
+	@rm -f "$(SNES9X2010_LIB)" "$(SNES9X2010_LIB).symbols.map"
+
+clean: snes9x2010-clean
+
+# AURORA_SNES9X2010_BUILD_OPTION_V1_20260824: compile-time gate; no runtime if/branch.
+SNES9X2010_FLAG_OBJS := $(filter %snes9x2010_bridge.o %mainloop_load.o,$(OBJS))
+SNES9X2010_MODE_STAMP := $(BUILD_META_DIR)/snes9x2010-mode-$(AURORA_SNES9X2010)
+$(SNES9X2010_FLAG_OBJS): CXXFLAGS += -DAURORA_SNES9X2010=$(AURORA_SNES9X2010)
+$(SNES9X2010_FLAG_OBJS): $(SNES9X2010_MODE_STAMP)
+$(SNES9X2010_MODE_STAMP):
+	@mkdir -p "$(BUILD_META_DIR)"
+	@rm -f "$(BUILD_META_DIR)/snes9x2010-mode-0" "$(BUILD_META_DIR)/snes9x2010-mode-1"
+	@touch "$@"
+
+# AURORA_FCEUMM_FDS_V0_5_RUNTIME_LINK
+$(TARGET): $(OBJS) $(PICODRIVE_LIB) $(QUICKNES_LIB) $(PCE_LIB) $(FCEUMM_FDS_LIB) $(SNES9X2010_LINK_DEPS) | $(OBJ_DIR)
+	$(call RUN_LINK,$@,$(EE_CXX) $(LTO_LINK_FLAGS) -Xlinker --gc-sections -Xlinker -Map -Xlinker "$(OBJ_DIR)/SNESticle.map" -o "$@" $(OBJS) "$(PICODRIVE_LIB)" "$(QUICKNES_LIB)" "$(PCE_LIB)" "$(FCEUMM_FDS_LIB)" $(SNES9X2010_LINK_ARGS) $(LIBDIRS) $(LIBS))
 
 $(TARGET_STRIPPED): $(TARGET)
 	@cp -f "$(TARGET)" "$@"
@@ -930,9 +1295,9 @@ packed: $(TARGET_PACKED)
 #   make elf out=<pasta>        # copies SNESticle(.packed).elf -> <pasta>/
 #
 # When PACK=1 (default) both the stripped/unpacked and the packed ELF are
-# copied; the packed one (`SNESticle.packed.elf`, ~490 KB) is the one
+# copied; the packed one (`SNESticle_Aurora.packed.elf`, ~490 KB) is the one
 # you want to ship. The linked ELF with debug symbols remains available as
-# build/SNESticle.elf, but is never copied as a standalone release file.
+# build/SNESticle_Aurora.elf, but is never copied as a standalone release file.
 elf: $(TARGET_STRIPPED) $(if $(filter 1,$(PACK)),$(TARGET_PACKED))
 	@if [ -n "$(strip $(out))" ]; then \
 		mkdir -p "$(out)"; \
@@ -956,7 +1321,7 @@ package: check-env $(TARGET_STRIPPED) package-irx
 package-irx: $(TARGET_STRIPPED) | $(PKG_DIR)
 	@set -e; \
 	echo "PKG $(PKG_DIR)"; \
-	cp "$(TARGET_STRIPPED)" "$(PKG_DIR)/SNESticle.elf"; \
+	cp "$(TARGET_STRIPPED)" "$(PKG_DIR)/SNESticle_Aurora.elf"; \
 	copy_sdk() { \
 		f="$$1"; found=""; \
 		for cand in "$$f" "$$(printf '%s' "$$f" | tr '[:upper:]' '[:lower:]')" "$$(printf '%s' "$$f" | tr '[:lower:]' '[:upper:]')"; do \
@@ -1026,7 +1391,7 @@ count:
 #   make iso roms=<pasta> bgm=<pasta> # + soundtracks .mod/.xm (cdfs:/BGM)
 
 ISO_GAME_ID   ?= SLUS_999.99
-ISO_GAME_NAME ?= SNESticle_Revive$(VER_SUFFIX)
+ISO_GAME_NAME ?= SNESticle_Aurora$(VER_SUFFIX)
 ISO_LABEL     ?= SNESTICLE_REVIVE
 ISO_ROOT_DIR  ?= $(OBJ_DIR)/iso_root
 ISO_OUT       ?= $(OBJ_DIR)/$(ISO_GAME_ID).$(ISO_GAME_NAME).iso
@@ -1333,7 +1698,7 @@ help:
 	printf "  make clean                   Delete build folder\n"; \
 	printf "\n"; \
 	printf "$${green}Output commands:$${reset}\n"; \
-	printf "  make OUT=/sdcard             Build and copy SNESticle.elf to OUT\n"; \
+	printf "  make OUT=/sdcard             Build and copy SNESticle_Aurora.elf to OUT\n"; \
 	printf "  make out=/sdcard             Same as OUT=/sdcard\n"; \
 	printf "  make elf OUT=/sdcard         Build ELF/packed ELF and copy to OUT\n"; \
 	printf "  make iso ROMS=/path OUT=/out Build ISO with ROM folder and copy to OUT\n"; \
@@ -1364,8 +1729,7 @@ help:
 	printf "  SNES_DIAGNOSTICS=2           Deep OBJ/DMA/GSU capture (measurable overhead)\n"; \
 	printf "  SNES_OBJ_CACHE=0             Disable shared CHR cache for OBJ A/B only\n"; \
 	printf "  SNES_BG_CACHE=1              Enable experimental BG CHR cache for A/B only\n"; \
-	printf "  SNES_SAFE_FRAMESKIP=0        Disable missed-VBlank video recovery for A/B\n"; \
-	printf "  SNES_MAX_CATCHUP_FRAMES=3    Maximum hidden catch-up frames per presentation\n"; \
+	printf "  SNES_CHR_HFLIP_CACHE=0       Disable pre-flipped 4bpp rows for Top Gear A/B\n"; \
 	printf "  OUT=/path                    Copy final ELF to this folder\n"; \
 	printf "  out=/path                    Same as OUT=/path\n"; \
 	printf "  ROMS=/path                   ROM folder for ISO build\n"; \
@@ -1621,3 +1985,8 @@ ensure-local-ps2-packer:
 	$(MAKE) -C "$(PS2_PACKER_SRC_DIR)" all CC="$$host_cc" BIN2C="$(BIN2C)" PS2DEV="$(PS2DEV)" PS2SDK="$(PS2SDK)" >/dev/null; \
 	test -x "$(PS2_PACKER_LOCAL)" || (echo "ERROR: local ps2-packer was not built"; exit 1); \
 	test -f "$(PS2_PACKER_SRC_DIR)/stub/lzma-1d00-stub" || (echo "ERROR: ps2-packer stub was not built"; exit 1)
+
+# AURORA_SMB_IOP_STACK_V3_20260827
+
+
+# AURORA_V4_12_PRIVATE_FILEXIO_CDDA_PCE_TOC2CUE_20260830

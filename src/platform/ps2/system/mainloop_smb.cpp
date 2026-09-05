@@ -1,4 +1,5 @@
 #include <ctype.h>
+extern "C" const char *AuroraNetGetConfigDiag(void);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,8 @@ enum SmbStatusE
     SMB_STATUS_CONFIG_INVALID,
     SMB_STATUS_CONFIG_SAVE_ERROR,
     SMB_STATUS_NETWORK_ERROR,
+    SMB_STATUS_NETWORK_INIT_ERROR,
+    SMB_STATUS_NETWORK_CONFIG_ERROR,
     SMB_STATUS_DHCP_TIMEOUT,
     SMB_STATUS_DRIVER_ERROR,
     SMB_STATUS_CONNECTION_ERROR,
@@ -119,7 +122,8 @@ void SmbConfigDefaults(SmbConfigT *config)
     strcpy(config->serverIp, "192.168.0.2");
     config->serverPort = 445;
     strcpy(config->share, "ROMS");
-    strcpy(config->user, "GUEST");
+    /* AURORA_SMB_BLANK_GUEST_V1_20260827: usuário vazio é válido. */
+    config->user[0] = '\0';
     config->passwordType = NO_PASSWORD;
 }
 
@@ -245,8 +249,6 @@ static int SmbReadConfigFile(const char *path, SmbConfigT *config)
 
     fclose(file);
 
-    if (!config->user[0])
-        strcpy(config->user, "GUEST");
     if (!config->password[0])
         config->passwordType = NO_PASSWORD;
     else if (!passwordTypeSeen)
@@ -323,9 +325,7 @@ static int SmbLoadConfig(SmbConfigT *config)
     /* A console without a usable memory card can keep the emulator-owned
        config on USB/MX4SIO or MMCE. Probe only storage the user enabled, and
        only after SMB was explicitly requested, so boot remains lazy. */
-    if ((MassStorageIsEnabled() || Mx4sioIsEnabled()) &&
-        (UsbBdmIsLoaded() || Mx4sioIsLoaded() ||
-         (MassStorageIsEnabled() && UsbBdmLoadEmbeddedIrx() >= 0)))
+    if (MassStorageIsEnabled() || Mx4sioIsEnabled())
     {
         for (index = 0; s_mass_config_paths[index]; ++index)
         {
@@ -362,15 +362,9 @@ static int SmbLoadConfig(SmbConfigT *config)
 
     /* ISO config is last because it is read-only and cannot be replaced by
        the setup screen. This probe only occurs after the user requests SMB. */
-    if (CdfsIsLoaded() ||
-        ((!strncasecmp(_MainLoop_BootDir, "cdfs:", 6) ||
-          !strncasecmp(_MainLoop_BootDir, "cdrom", 5)) &&
-         CdfsLoadEmbeddedIrx() >= 0))
-    {
-        result = SmbTryConfig("cdfs:/SMB.CNF", config);
-        if (result != 0)
-            return result;
-    }
+    result = SmbTryConfig("cdfs:/SMB.CNF", config);
+    if (result != 0)
+        return result;
     return 0;
 }
 
@@ -448,7 +442,7 @@ static int SmbWriteConfigFile(const char *path, const SmbConfigT *config)
         return -1;
 
     ok = fprintf(file,
-                 "# SNESticle Revive SMB configuration\n"
+                 "# SNESticle Aurora SMB configuration\n"
                  "SERVER_IP=%s\n"
                  "SERVER_PORT=%d\n"
                  "SHARE=%s\n"
@@ -456,7 +450,7 @@ static int SmbWriteConfigFile(const char *path, const SmbConfigT *config)
                  "PASSWORD=%s\n"
                  "PASSWORD_TYPE=%d\n",
                  config->serverIp, config->serverPort, config->share,
-                 config->user[0] ? config->user : "GUEST",
+                 config->user,
                  config->password, config->passwordType) >= 0;
     if (fclose(file) != 0)
         ok = 0;
@@ -486,8 +480,6 @@ int SmbSaveConfig(const SmbConfigT *source)
     config.share[sizeof(config.share) - 1] = '\0';
     config.user[sizeof(config.user) - 1] = '\0';
     config.password[sizeof(config.password) - 1] = '\0';
-    if (!config.user[0])
-        strcpy(config.user, "GUEST");
     config.passwordType = config.password[0] ? HASHED_PASSWORD : NO_PASSWORD;
     if (!SmbValidateConfig(&config))
         return -2;
@@ -599,11 +591,18 @@ int SmbEnsureMounted(void)
         return -1;
     }
 
-    if (!_MainLoopInitNetwork(_MainLoop_NetConfigPaths) ||
-        !_MainLoopConfigureNetwork(_MainLoop_NetConfigPaths,
+    /* AURORA_SMB_EE_PS2IP_FIX_V2_20260827:
+       keep init/config failures distinct so real-hardware testing is visible
+       directly in the SMB status line. */
+    if (!_MainLoopInitNetwork(_MainLoop_NetConfigPaths))
+    {
+        SmbSetFailure(SMB_STATUS_NETWORK_INIT_ERROR, -31);
+        return -1;
+    }
+    if (!_MainLoopConfigureNetwork(_MainLoop_NetConfigPaths,
                                    (char *)"ipconfig.dat"))
     {
-        SmbSetFailure(SMB_STATUS_NETWORK_ERROR, -3);
+        SmbSetFailure(SMB_STATUS_NETWORK_CONFIG_ERROR, -32);
         return -1;
     }
     if (!_MainLoopWaitForNetwork(15000))
@@ -728,24 +727,26 @@ void SmbReportBrowseSuccess(void)
 const char *SmbGetStatusText(void)
 {
     if (!SmbSupportIsEnabled())
-        return "Off";
+        return "关";
 
     switch (s_status)
     {
-        case SMB_STATUS_CONNECTING:       return "Connecting";
-        case SMB_STATUS_CONNECTED:        return "Connected";
-        case SMB_STATUS_CONFIG_MISSING:   return "No SMB.CNF";
-        case SMB_STATUS_CONFIG_INVALID:   return "Bad SMB.CNF";
-        case SMB_STATUS_CONFIG_SAVE_ERROR:return "Save Error";
-        case SMB_STATUS_NETWORK_ERROR:    return "Network Error";
-        case SMB_STATUS_DHCP_TIMEOUT:     return "DHCP Timeout";
-        case SMB_STATUS_DRIVER_ERROR:     return "Driver Error";
-        case SMB_STATUS_CONNECTION_ERROR: return "Connect Error";
-        case SMB_STATUS_PROTOCOL_ERROR:   return "SMB1 Required";
-        case SMB_STATUS_AUTH_ERROR:       return "Auth Error";
-        case SMB_STATUS_SHARE_ERROR:      return "Share Error";
-        case SMB_STATUS_BROWSE_ERROR:     return "Browse Error";
-        default:                          return "Enabled";
+        case SMB_STATUS_CONNECTING:       return "连接中";
+        case SMB_STATUS_CONNECTED:        return "已连接";
+        case SMB_STATUS_CONFIG_MISSING:   return "缺少SMB.CNF";
+        case SMB_STATUS_CONFIG_INVALID:   return "SMB.CNF无效";
+        case SMB_STATUS_CONFIG_SAVE_ERROR:return "保存错误";
+        case SMB_STATUS_NETWORK_ERROR:       return "网络错误";
+        case SMB_STATUS_NETWORK_INIT_ERROR:  return "网络初始化错误";
+        case SMB_STATUS_NETWORK_CONFIG_ERROR:return AuroraNetGetConfigDiag();
+        case SMB_STATUS_DHCP_TIMEOUT:     return "DHCP超时";
+        case SMB_STATUS_DRIVER_ERROR:     return "驱动错误";
+        case SMB_STATUS_CONNECTION_ERROR: return "连接错误";
+        case SMB_STATUS_PROTOCOL_ERROR:   return "需要SMB1";
+        case SMB_STATUS_AUTH_ERROR:       return "认证错误";
+        case SMB_STATUS_SHARE_ERROR:      return "共享错误";
+        case SMB_STATUS_BROWSE_ERROR:     return "浏览错误";
+        default:                          return "已启用";
     }
 }
 

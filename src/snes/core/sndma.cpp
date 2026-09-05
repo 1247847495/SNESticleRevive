@@ -47,6 +47,162 @@ static Int8 _SNDma_MDMAInc[4] =
 	1, 0, -1, 0
 };
 
+/* AURORA_SPEEDY_MDR_HDMA_V1
+   Every HDMA read passes through the S-CPU MDR/open-bus latch.
+   Scope is intentionally HDMA-only; the 65816 ASM hot path is untouched. */
+/* AURORA_MEGA_V2_DMA_BUS
+ * The S-CPU DMA unit has separate A and B buses. A-bus DMA cannot use the
+ * CPU/PPU I/O aliases, and B-bus $2180 cannot be used to copy WRAM back to
+ * WRAM. Invalid reads return zero and still drive the CPU MDR; invalid writes
+ * are discarded. These predicates follow the same address masks as bsnes.
+ *
+ * The raw helpers inline SNCPURead8/SNCPUWrite8's exact bank/trap decision.
+ * That preserves PPU queue side effects and emulated cycles while avoiding a
+ * C function call for each ordinary ROM/WRAM HDMA byte on the PS2 EE.
+ */
+static _INLINE Bool SnesDMAValidAAddress(Uint32 uAddr)
+{
+	uAddr &= 0xFFFFFF;
+	if ((uAddr & 0x40FF00) == 0x002100) return FALSE;
+	if ((uAddr & 0x40FE00) == 0x004000) return FALSE;
+	if ((uAddr & 0x40FFE0) == 0x004200) return FALSE;
+	if ((uAddr & 0x40FF80) == 0x004300) return FALSE;
+	return TRUE;
+}
+
+static _INLINE Bool SnesDMAValidBAddress(Uint32 uAddrA, Uint8 uPortB)
+{
+	if (uPortB != 0x80) return TRUE;
+	uAddrA &= 0xFFFFFF;
+	if ((uAddrA & 0xFE0000) == 0x7E0000) return FALSE;
+	if ((uAddrA & 0x40E000) == 0x000000) return FALSE;
+	return TRUE;
+}
+
+static _INLINE Uint8 SnesDMARawRead8(SNCpuT *pCPU, Uint32 uAddr)
+{
+	SNCpuBankT *pBank;
+	uAddr &= 0xFFFFFF;
+	pBank = &pCPU->Bank[uAddr >> SNCPU_BANK_SHIFT];
+	if (pBank->pMem)
+		return pBank->pMem[uAddr];
+	return pBank->pReadTrapFunc(pCPU, uAddr);
+}
+
+static _INLINE void SnesDMARawWrite8(SNCpuT *pCPU, Uint32 uAddr, Uint8 uData)
+{
+	SNCpuBankT *pBank;
+	uAddr &= 0xFFFFFF;
+	pBank = &pCPU->Bank[uAddr >> SNCPU_BANK_SHIFT];
+	if (pBank->bRAM)
+		pBank->pMem[uAddr] = uData;
+	else
+		pBank->pWriteTrapFunc(pCPU, uAddr, uData);
+}
+
+static _INLINE Uint8 SnesDMAReadA(SNCpuT *pCPU, Uint32 uAddr)
+{
+	Uint8 uData = SnesDMAValidAAddress(uAddr) ? SnesDMARawRead8(pCPU, uAddr) : 0;
+	pCPU->uMDR = uData;
+	return uData;
+}
+
+static _INLINE void SnesDMAWriteA(SNCpuT *pCPU, Uint32 uAddr, Uint8 uData)
+{
+	if (SnesDMAValidAAddress(uAddr))
+		SnesDMARawWrite8(pCPU, uAddr, uData);
+}
+
+static _INLINE Uint8 SnesDMAReadB(SNCpuT *pCPU, Uint32 uAddrA, Uint8 uPortB)
+{
+	Uint8 uData = SnesDMAValidBAddress(uAddrA, uPortB)
+		? SnesDMARawRead8(pCPU, 0x2100 | uPortB) : 0;
+	pCPU->uMDR = uData;
+	return uData;
+}
+
+static _INLINE void SnesDMAWriteB(SNCpuT *pCPU, Uint32 uAddrA, Uint8 uPortB, Uint8 uData)
+{
+	if (SnesDMAValidBAddress(uAddrA, uPortB))
+		SnesDMARawWrite8(pCPU, 0x2100 | uPortB, uData);
+}
+
+static _INLINE Uint8 SnesHDMARead8(SNCpuT *pCPU, Uint32 uAddr)
+{
+	return SnesDMAReadA(pCPU, uAddr);
+}
+
+/* AURORA_HDMA_PPU_FASTQUEUE_V2
+ *
+ * Universal, semantics-preserving HDMA fast path for S-PPU writes.
+ * B-bus $2100-$213F normally reaches SnesSystem::Write2000(), whose PPU
+ * path enqueues the same (scanline, address, data) tuple. Queue it here
+ * directly to avoid generic CPU bank/trap dispatch on every HDMA byte.
+ *
+ * No transfer is skipped, reordered or made cheaper in emulated cycles.
+ * Queue-full returns FALSE so the caller takes the original path, which
+ * performs SyncPPU() as needed and retries the write.
+ */
+static _INLINE Bool SnesHDMATryQueuePPUWrite(
+    SnesPPU *pPPU, Uint32 uLine, Uint8 uPortB, Uint8 uData)
+{
+    if (uPortB < 0x40)
+    {
+        return pPPU->EnqueueWrite(
+            uLine, 0x2100u | (Uint32)uPortB, uData, FALSE);
+    }
+
+    return FALSE;
+}
+
+static _INLINE Bool SnesDMAPathTouches16(Uint16 uStart, Uint32 nBytes,
+                                         Int32 iDelta, Uint16 uLo, Uint16 uHi)
+{
+	Uint32 uDistance;
+	if (!nBytes) return FALSE;
+	if (uStart >= uLo && uStart <= uHi) return TRUE;
+	if (iDelta == 0) return FALSE;
+	if (nBytes >= 0x10000u) return TRUE;
+	if (iDelta > 0)
+		uDistance = ((Uint32)uLo - uStart) & 0xFFFFu;
+	else
+		uDistance = ((Uint32)uStart - uHi) & 0xFFFFu;
+	return uDistance < nBytes;
+}
+
+static Bool SnesDMAChannelNeedsAccurateBus(const SnesDMAChT *pChan)
+{
+	Uint32 nBytes = pChan->dasx ? (Uint32)pChan->dasx : 0x10000u;
+	Int32 iDelta = _SNDma_MDMAInc[(pChan->dmapx >> 3) & 3];
+	Bool bRestrictedBank = (pChan->a1bx & 0x40) == 0;  // $00-$3f/$80-$bf
+	Bool bUsesWramPort = FALSE;
+	Uint32 i;
+
+	if (bRestrictedBank)
+	{
+		if (SnesDMAPathTouches16(pChan->a1tx, nBytes, iDelta, 0x2100, 0x21FF) ||
+		    SnesDMAPathTouches16(pChan->a1tx, nBytes, iDelta, 0x4000, 0x41FF) ||
+		    SnesDMAPathTouches16(pChan->a1tx, nBytes, iDelta, 0x4200, 0x421F) ||
+		    SnesDMAPathTouches16(pChan->a1tx, nBytes, iDelta, 0x4300, 0x437F))
+			return TRUE;
+	}
+
+	for (i = 0; i < 4; i++)
+	{
+		if ((Uint8)(pChan->bbadx + _SNDma_MDMATransfer[pChan->dmapx & 7][i]) == 0x80)
+		{
+			bUsesWramPort = TRUE;
+			break;
+		}
+	}
+	if (!bUsesWramPort) return FALSE;
+	if ((pChan->a1bx & 0xFE) == 0x7E) return TRUE;
+	if (bRestrictedBank &&
+	    SnesDMAPathTouches16(pChan->a1tx, nBytes, iDelta, 0x0000, 0x1FFF))
+		return TRUE;
+	return FALSE;
+}
+
 void SnesDMAWritePPUPort(SnesPPU *pPPU, Uint32 uPort, Uint8 uData)
 {
 	assert(pPPU != NULL);
@@ -57,32 +213,6 @@ void SnesDMAWritePPUPort(SnesPPU *pPPU, Uint32 uPort, Uint8 uData)
 	   control registers while the optimized data ports below take effect
 	   immediately, reversing the byte order observed by the PPU. */
 	pPPU->Write8(0x2100 + (uPort & 0xFF), uData);
-}
-
-/* HDMA A->B para $2100-$213F termina exatamente na mesma fila usada por
-   SnesSystem::Write2000(). Enfileirar a mesma tupla aqui evita o despacho
-   generico de banco/trap para cada byte, sem alterar ordem, scanline ou os
-   ciclos emulados. Fila cheia retorna FALSE e preserva o caminho original,
-   que sincroniza o PPU e tenta novamente. */
-static _INLINE Bool SnesHDMATryQueuePPUWrite(
-	SnesPPU *pPPU, Uint32 uLine, Uint8 uPortB, Uint8 uData)
-{
-	if (uPortB < 0x40)
-		/* O fallback generico contabiliza a unica falha real da fila. */
-		return pPPU->EnqueueWrite(
-			uLine, 0x2100u | uPortB, uData, FALSE);
-	return FALSE;
-}
-
-/* SNCPURead8 lives in a separate C translation unit, so GCC cannot inline its
-   very small direct-memory fast path into the per-scanline HDMA loops.  Keep
-   trap semantics identical while avoiding thousands of calls per second for
-   ordinary ROM/WRAM table reads. */
-static _INLINE Uint8 SnesHDMARead8(SNCpuT *pCPU, Uint32 uAddr)
-{
-	SNCpuBankT *pBank = &pCPU->Bank[uAddr >> SNCPU_BANK_SHIFT];
-	Uint8 *pMem = pBank->pMem;
-	return pMem ? pMem[uAddr] : pBank->pReadTrapFunc(pCPU, uAddr);
 }
 
 #if SNDBG_DEEP
@@ -337,6 +467,28 @@ void SnesDMAC::SetMDMAEnable(Uint8 uData)
 		}
 	}
 #endif
+	/* AURORA_V7_MDMA_START_OVERHEAD
+	 * AURORA_V82_MDMA_START_DEFERRED
+	 * $420B arms MDMA but does not steal bus clocks in the middle of the
+	 * instruction that wrote it. ExecuteCPU() observes SNCPU_SIGNAL_DMA
+	 * after that instruction/abort boundary; ProcessMDMA() then performs
+	 * divider synchronization, global overhead and per-channel overhead. */
+	if (uData)
+	{
+		Uint32 uStartChan;
+		for (uStartChan = 0; uStartChan < SNESDMAC_CHANNEL_NUM; uStartChan++)
+		{
+			if (uData & (1 << uStartChan))
+				m_MDMAPhase[uStartChan] = 0;
+		}
+		m_MDMAStartupPending = 1;
+		m_MDMAChannelStartup = uData;
+	}
+	else
+	{
+		m_MDMAStartupPending = 0;
+		m_MDMAChannelStartup = 0;
+	}
 	m_MDMAEnable = uData;
 }
 
@@ -353,64 +505,41 @@ void SnesDMAC::SetHDMAEnable(Uint8 uData)
 
 void SnesDMAC::ProcessMDMAChRead(Uint32 uChan)
 {
-    SnesDMAChT *pChan;
-
-    assert(uChan < SNESDMAC_CHANNEL_NUM);
-
-    pChan = &m_Channels[uChan];
-
-    Int32 uSrcDelta;
+	SnesDMAChT *pChan;
+	Int32 uDstDelta;
 	Uint8 *pTransfer;
-	Int32 iTransfer=0;
+	Uint8 uPhase;
 
-    // any cycles available?
-    if (m_pCPU->Cycles <= 0) {
-        return;
-    }
-	// determine a-bus increment
-	uSrcDelta = _SNDma_MDMAInc[(pChan->dmapx>>3) & 3];
+	assert(uChan < SNESDMAC_CHANNEL_NUM);
+	pChan = &m_Channels[uChan];
+	if (m_pCPU->Cycles <= 0) return;
 
-	// get transfer order
+	uDstDelta = _SNDma_MDMAInc[(pChan->dmapx >> 3) & 3];
 	pTransfer = _SNDma_MDMATransfer[pChan->dmapx & 7];
-	iTransfer = 0;
+	uPhase = m_MDMAPhase[uChan] & 3;
 
+	/* AURORA_V82_MDMA_PHASE_READ */
 	do
 	{
+		Uint32 uAddrA = ((Uint32)pChan->a1bx << 16) | pChan->a1tx;
+		Uint8 uPortB = (Uint8)(pChan->bbadx + pTransfer[uPhase]);
 		Uint8 uData;
-		Uint32 uAddr;
+		uPhase = (Uint8)((uPhase + 1) & 3);
 
-
-		// get address to read from
-		uAddr = 0x2100 + pChan->bbadx + pTransfer[iTransfer & 3];
-		iTransfer++;
-
-		// read byte
-		uData = SNCPURead8(m_pCPU, uAddr);
-
-		// write byte
-		SNCPUWrite8(m_pCPU, pChan->a1tx | (pChan->a1bx << 16), uData);
-
-		// increment src address (does overflow go into next bank?)
-		pChan->a1tx += uSrcDelta;
-
-		// decrement byte count
+		uData = SnesDMAReadB(m_pCPU, uAddrA, uPortB);
+		SnesDMAWriteA(m_pCPU, uAddrA, uData);
+		pChan->a1tx = (Uint16)(pChan->a1tx + uDstDelta);
 		pChan->dasx--;
-
-        // decrement cpu clock cycles
-        SNCPUConsumeCycles(m_pCPU, SNCPU_CYCLE_SLOW * 1);
+		SNCPUConsumeCycles(m_pCPU, SNCPU_CYCLE_SLOW);
 	}
-	/* Finish the four-byte B-bus pattern once a slice starts.  Otherwise a
-	   scheduler boundary after byte 1/2/3 restarts the next slice at phase 0
-	   and corrupts reverse DMA modes 1, 3, 4, 5 and 7. */
-	while (pChan->dasx != 0 &&
-		(m_pCPU->Cycles > 0 || (iTransfer & 3) != 0));
+	while (pChan->dasx != 0 && m_pCPU->Cycles > 0);
 
-    // are we done?
-    if (pChan->dasx == 0)
-    {
-        // clear channel enable bit
-        m_MDMAEnable &= ~(1 << uChan);
-    }
+	m_MDMAPhase[uChan] = uPhase;
+	if (pChan->dasx == 0)
+	{
+		m_MDMAEnable &= ~(1 << uChan);
+		m_MDMAPhase[uChan] = 0;
+	}
 }
 
 #if 0
@@ -482,98 +611,133 @@ Uint32 SnesDMAC::ProcessMDMACh(Uint32 uChan)
 
 void SnesDMAC::TransferData(SnesDMAChT *pChan, Uint8 *pData, Int32 nBytes)
 {
-    SNCPUConsumeCycles(m_pCPU,  SNCPU_CYCLE_SLOW * nBytes);
+    Uint32 uChan = (Uint32)(pChan - m_Channels);
+    Uint8 uPhase = m_MDMAPhase[uChan] & 3;
+    Int32 nOriginalBytes = nBytes;
 
-    // special case simple transfer mode llll
-	if ((pChan->dmapx & 7)==0)
+    /* A->B MDMA leaves the last A-bus source byte on MDR. */
+    if (nBytes > 0)
+        m_pCPU->uMDR = pData[nBytes - 1];
+
+    SNCPUConsumeCycles(m_pCPU, SNCPU_CYCLE_SLOW * nBytes);
+
+    /* AURORA_V82_MDMA_BYTE_SLICING
+     * V8.1's fast path rounded every slice UP to a four-byte group because
+     * TransferData() restarted the mode phase at zero. That can run MDMA
+     * up to three bytes (24 master clocks) beyond HBlank/HDMA/IRQ/refresh.
+     * Keep the phase per channel instead: chunks may now end after any byte. */
+    if ((pChan->dmapx & 7) == 0)
+    {
+        switch (pChan->bbadx)
+        {
+        case 0x04:
+            m_pPPU->WriteOAMBlock(pData, nBytes);
+            break;
+        case 0x18:
+            while (nBytes > 0) { m_pPPU->WriteVMDATAL(*pData++); nBytes--; }
+            break;
+        case 0x19:
+            while (nBytes > 0) { m_pPPU->WriteVMDATAH(*pData++); nBytes--; }
+            break;
+        case 0x22:
+            while (nBytes > 0) { m_pPPU->WriteCGDATA(*pData++); nBytes--; }
+            break;
+        default:
+            while (nBytes > 0)
+            {
+                SNCPUWrite8(m_pCPU, 0x2100 + pChan->bbadx, *pData++);
+                nBytes--;
+            }
+            break;
+        }
+        uPhase = (Uint8)((uPhase + nOriginalBytes) & 3);
+    }
+    else
+    {
+        Uint8 *pTransfer = _SNDma_MDMATransfer[pChan->dmapx & 7];
+
+        /* Preserve the hot mode-1 VRAM block path across an event split. */
+        if ((pChan->dmapx & 7) == 1 && pChan->bbadx == 0x18)
+        {
+            if ((uPhase & 1) && nBytes > 0)
+            {
+                m_pPPU->WriteVMDATAH(*pData++);
+                uPhase = (Uint8)((uPhase + 1) & 3);
+                nBytes--;
+            }
+            if (nBytes >= 2)
+            {
+                Int32 nBulk = nBytes & ~1;
+                m_pPPU->WriteVMDATABlock(pData, nBulk);
+                pData += nBulk;
+                nBytes -= nBulk;
+                uPhase = (Uint8)((uPhase + nBulk) & 3);
+            }
+        }
+
+        while (nBytes > 0)
+        {
+            Uint8 uData = *pData++;
+            Uint8 uPortB = (Uint8)(pChan->bbadx + pTransfer[uPhase]);
+            uPhase = (Uint8)((uPhase + 1) & 3);
+
+            switch (uPortB)
+            {
+            case 0x04: m_pPPU->WriteOAMDATA(uData); break;
+            case 0x18: m_pPPU->WriteVMDATAL(uData); break;
+            case 0x19: m_pPPU->WriteVMDATAH(uData); break;
+            case 0x22: m_pPPU->WriteCGDATA(uData); break;
+            default:
+                if (uPortB < 0x40)
+                    SnesDMAWritePPUPort(m_pPPU, uPortB, uData);
+                else
+                    SNCPUWrite8(m_pCPU, 0x2100 + uPortB, uData);
+                break;
+            }
+            nBytes--;
+        }
+    }
+
+    m_MDMAPhase[uChan] = uPhase;
+}
+
+
+void SnesDMAC::ProcessMDMAChAccurate(Uint32 uChan)
+{
+	SnesDMAChT *pChan;
+	Int32 iSrcDelta;
+	Uint8 *pTransfer;
+	Uint8 uPhase;
+
+	assert(uChan < SNESDMAC_CHANNEL_NUM);
+	pChan = &m_Channels[uChan];
+	if (m_pCPU->Cycles <= 0) return;
+
+	iSrcDelta = _SNDma_MDMAInc[(pChan->dmapx >> 3) & 3];
+	pTransfer = _SNDma_MDMATransfer[pChan->dmapx & 7];
+	uPhase = m_MDMAPhase[uChan] & 3;
+
+	/* AURORA_V82_MDMA_PHASE_ACCURATE */
+	do
 	{
-		switch (pChan->bbadx)
-		{
-		case 0x04: // oamdata (oam data)
-			m_pPPU->WriteOAMBlock(pData, nBytes);
-			break;
-		case 0x18: // vmaddl (video port address low)
-			while (nBytes > 0)
-			{
-				m_pPPU->WriteVMDATAL(*pData++);
-				nBytes--;
-			}
-			break;
-		case 0x19: // vmdatah (video port data hi)
-			while (nBytes > 0)
-			{
-				m_pPPU->WriteVMDATAH(*pData++);
-				nBytes--;
-			}
-			break;
-		case 0x22: // cgdata (color data)
-			while (nBytes > 0)
-			{
-				m_pPPU->WriteCGDATA(*pData++);
-				nBytes--;
-			}
-			break;
+		Uint32 uAddrA = ((Uint32)pChan->a1bx << 16) | pChan->a1tx;
+		Uint8 uPortB = (Uint8)(pChan->bbadx + pTransfer[uPhase]);
+		Uint8 uData;
+		uPhase = (Uint8)((uPhase + 1) & 3);
 
-		default:
-			// generic write byte
-			while (nBytes > 0)
-			{
-				SNCPUWrite8(m_pCPU, 0x2100 + pChan->bbadx, *pData++);
-				nBytes--;
-			}
-		}
+		uData = SnesDMAReadA(m_pCPU, uAddrA);
+		SnesDMAWriteB(m_pCPU, uAddrA, uPortB, uData);
+		pChan->a1tx = (Uint16)(pChan->a1tx + iSrcDelta);
+		pChan->dasx--;
+		SNCPUConsumeCycles(m_pCPU, SNCPU_CYCLE_SLOW);
+	}
+	while (pChan->dasx != 0 && m_pCPU->Cycles > 0);
 
-	} else
-	if ((pChan->dmapx & 7)==1 && pChan->bbadx==0x18)
+	m_MDMAPhase[uChan] = uPhase;
+	if (pChan->dasx == 0)
 	{
-		m_pPPU->WriteVMDATABlock(pData, nBytes);
-	} else
-	{
-		Uint8 *pTransfer;
-		Int32 iTransfer=0;
-
-		// get transfer order
-		pTransfer = _SNDma_MDMATransfer[pChan->dmapx & 7];
-
-		while (nBytes > 0)
-		{
-			Uint8 uData;
-			Uint32 uAddr;
-
-			// fetch data byte
-			uData = pData[iTransfer];
-
-			// get address to write to (8-bit b-bus, wrapping at $21FF)
-			uAddr = (pChan->bbadx + pTransfer[iTransfer & 3]) & 0xFF;
-			iTransfer++;
-
-			switch (uAddr)
-			{
-			case 0x04: // oamdata (oam data)
-				m_pPPU->WriteOAMDATA(uData);
-				break;
-			case 0x18: // vmaddl (video port address low)
-				m_pPPU->WriteVMDATAL(uData);
-				break;
-			case 0x19: // vmdatah (video port data hi)
-				m_pPPU->WriteVMDATAH(uData);
-				break;
-			case 0x22: // cgdata (color data)
-				m_pPPU->WriteCGDATA(uData);
-				break;
-
-			default:
-				/* PPU MDMA bytes must bypass the normal per-scanline write
-				   queue.  First Samurai uses mode 4 at BBAD=$16, producing
-				   $2116,$2117,$2118,$2119 groups; queuing only the first
-				   two made every tile word land at a stale VRAM address. */
-				if (uAddr < 0x40)
-					SnesDMAWritePPUPort(m_pPPU, uAddr, uData);
-				else
-					SNCPUWrite8(m_pCPU, 0x2100 + uAddr, uData);
-			}
-			nBytes--;
-		}
+		m_MDMAEnable &= ~(1 << uChan);
+		m_MDMAPhase[uChan] = 0;
 	}
 }
 
@@ -606,6 +770,20 @@ void SnesDMAC::ProcessMDMAChFast(Uint32 uChan)
 	{
 		// ppu -> mem
 		return ProcessMDMAChRead(uChan);
+	}
+
+	/* AURORA_MEGA_V3_MDMA_DECREMENT_BUS
+	 * Keep decrementing A-bus transfers on mega-v2's byte-accurate path.
+	 * The old fast branch was already per-byte for decrement mode, so this
+	 * costs essentially no useful bulk optimisation while ensuring every
+	 * byte gets the same A/B validity and MDR semantics.  Fixed-address
+	 * mode is intentionally NOT forced here: S-DD1 legitimately uses that
+	 * mode and has its own decompression fast path below. */
+	if ((((pChan->dmapx >> 3) & 3) == 2) ||
+	    SnesDMAChannelNeedsAccurateBus(pChan))
+	{
+		ProcessMDMAChAccurate(uChan);
+		return;
 	}
 
 	// S-DD1: descomprime quando o DMA tem endereco-A fixo (dmapx bit 0x08) e
@@ -670,9 +848,10 @@ void SnesDMAC::ProcessMDMAChFast(Uint32 uChan)
             nBytes = sizeof(DmaBuffer);
 
         // clamp number of bytes to cycle time remaining
-        Int32 nMaxBytes = ((m_pCPU->Cycles+7) >> 3);
-        // we must transfer a multiple of 4-bytes at a time though....
-        nMaxBytes = (nMaxBytes + 3) & ~3;
+        /* AURORA_V82_MDMA_FAST_BYTE_BOUNDARY
+         * Round only to the next complete DMA byte. TransferData() now
+         * preserves mode phase, so four-byte rounding is unnecessary. */
+        Int32 nMaxBytes = ((m_pCPU->Cycles + 7) >> 3);
         if (nBytes > nMaxBytes)
             nBytes = nMaxBytes;
 
@@ -757,6 +936,8 @@ void SnesDMAC::ProcessMDMAChFast(Uint32 uChan)
 #endif
         // clear channel enable bit
         m_MDMAEnable &= ~(1 << uChan);
+        /* AURORA_V82_MDMA_PHASE_COMPLETE */
+        m_MDMAPhase[uChan] = 0;
     }
 }
 
@@ -791,6 +972,10 @@ void SnesDMAC::BeginHDMA()
 			continue;
 
 		pChan = &m_Channels[uChan];
+		/* HDMA setup cancels MDMA already armed on the same channel. */
+		m_MDMAEnable &= (Uint8)~uMask;
+		m_MDMAChannelStartup &= (Uint8)~uMask;
+		m_MDMAPhase[uChan] = 0;
 		pChan->a2ax = pChan->a1tx;
 		pChan->ntlrx = SnesHDMARead8(m_pCPU,
 			(Uint16)pChan->a2ax | (pChan->a1bx << 16));
@@ -834,6 +1019,14 @@ void SnesDMAC::ProcessHDMACh(Uint32 uChan, Uint32 uLine)
 
 	assert(uChan < SNESDMAC_CHANNEL_NUM);
 	pChan = &m_Channels[uChan];
+	m_MDMAEnable &= (Uint8)~(1 << uChan);  // HDMA owns/cancels DMA on this channel
+	m_MDMAChannelStartup &= (Uint8)~(1 << uChan);
+	m_MDMAPhase[uChan] = 0;
+	/* AURORA_V82_LOST_VIKINGS_HDMA_FIXED_DECREMENT
+	 * The Lost Vikings is a canonical compatibility case here: DMAP bits
+	 * 3 (fixed) and 4 (decrement) affect MDMA only. HDMA direct A2A and
+	 * indirect DAS addresses ALWAYS advance after each transferred byte.
+	 * Deliberately do not call _SNDma_MDMAInc from this function. */
 	uMode = pChan->dmapx & 7;
 	nBytes = _SNDma_HDMABytes[uMode];
 	pTransfer = _SNDma_MDMATransfer[uMode];
@@ -842,26 +1035,30 @@ void SnesDMAC::ProcessHDMACh(Uint32 uChan, Uint32 uLine)
 	{
 		Uint32 uAddrA;
 		Uint8 uPortB = (Uint8)(pChan->bbadx + pTransfer[i]);
-		Uint32 uAddrB = 0x2100 | uPortB;
 		Uint8 uData;
 
 		if (pChan->dmapx & 0x40)
-			uAddrA = (pChan->dasbx << 16) | pChan->dasx;
+			uAddrA = ((Uint32)pChan->dasbx << 16) | pChan->dasx;
 		else
-			uAddrA = (pChan->a1bx << 16) | pChan->a2ax;
+			uAddrA = ((Uint32)pChan->a1bx << 16) | pChan->a2ax;
 
 		if (pChan->dmapx & 0x80)
 		{
-			uData = SnesHDMARead8(m_pCPU, uAddrB);
-			SNCPUWrite8(m_pCPU, uAddrA, uData);
+			uData = SnesDMAReadB(m_pCPU, uAddrA, uPortB);
+			SnesDMAWriteA(m_pCPU, uAddrA, uData);
 		}
 		else
 		{
-			uData = SnesHDMARead8(m_pCPU, uAddrA);
+			uData = SnesDMAReadA(m_pCPU, uAddrA);
+
+			/* AURORA_HDMA_PPU_FASTQUEUE_V2
+			 * Preserve the exact old fallback for every non-PPU port and
+			 * whenever the PPU queue is full. Emulated HDMA cycle charging
+			 * remains below, unchanged. */
 			if (!SnesHDMATryQueuePPUWrite(
 			        m_pPPU, uLine, uPortB, uData))
 			{
-				SNCPUWrite8(m_pCPU, uAddrB, uData);
+				SnesDMAWriteB(m_pCPU, uAddrA, uPortB, uData);
 			}
 #if SNDBG_LOG
 			{
@@ -895,18 +1092,45 @@ void SnesDMAC::ProcessMDMA()
 {
     Uint32 uChan = 0;
 
+    /* AURORA_V82_MDMA_DEFERRED_ENGINE
+     * Finish the $420B-writing instruction first, synchronize to the DMA
+     * divider, pay 8 global clocks, then 8 clocks when each enabled channel
+     * actually starts. Pending HDMA can take priority at the boundaries
+     * between those stages and between individual data bytes. */
+    if (m_MDMAEnable && m_MDMAStartupPending)
+    {
+        Int32 nPhase = SNCPUGetCounter(m_pCPU, SNCPU_COUNTER_TOTAL) & 7;
+        Int32 nAlign = 8 - nPhase;
+        SNCPUConsumeCycles(m_pCPU, nAlign + SNCPU_CYCLE_SLOW);
+        m_MDMAStartupPending = 0;
+        if (m_pCPU->Cycles <= 0)
+            return;
+    }
+
     while (m_MDMAEnable && (m_pCPU->Cycles > 0))
     {
         if (m_MDMAEnable & (1 << uChan))
         {
-            // process channel
+            Uint8 uMask = (Uint8)(1 << uChan);
+            if (m_MDMAChannelStartup & uMask)
+            {
+                SNCPUConsumeCycles(m_pCPU, SNCPU_CYCLE_SLOW);
+                m_MDMAChannelStartup &= (Uint8)~uMask;
+                if (m_pCPU->Cycles <= 0)
+                    return;
+            }
             ProcessMDMAChFast(uChan);
-        } 
+        }
         else
         {
-            // next channel
             uChan++;
         }
+    }
+
+    if (!m_MDMAEnable)
+    {
+        m_MDMAStartupPending = 0;
+        m_MDMAChannelStartup = 0;
     }
 }
 
@@ -929,7 +1153,17 @@ void SnesDMAC::ProcessHDMA(Uint32 uLine)
 	for (Uint32 uChan = 0; uChan < SNESDMAC_CHANNEL_NUM; uChan++)
 	{
 		Uint8 uMask = (Uint8)(1 << uChan);
-		if ((uActive & uMask) && (m_HDMADoTransfer & uMask))
+		if (!(uActive & uMask))
+			continue;
+
+		/* AURORA_V7_HDMA_CANCELS_MDMA_ON_SKIP
+		 * Hardware cancels MDMA on an active HDMA channel before testing
+		 * hdmaDoTransfer.  Repeat/skip lines therefore cancel it too. */
+		m_MDMAEnable &= (Uint8)~uMask;
+		m_MDMAChannelStartup &= (Uint8)~uMask;
+		m_MDMAPhase[uChan] = 0;
+
+		if (m_HDMADoTransfer & uMask)
 		{
 #if SNDBG_LOG
 			g_DbgHDMATransferChannels++;
@@ -1016,6 +1250,10 @@ void SnesDMAC::Reset()
 {
 	memset(m_Channels, 0xFF, sizeof(m_Channels));
 	m_MDMAEnable = 0;
+	/* AURORA_V82_MDMA_PHASE_RESET */
+	memset(m_MDMAPhase, 0, sizeof(m_MDMAPhase));
+	m_MDMAChannelStartup = 0;
+	m_MDMAStartupPending = 0;
 	m_HDMAEnable = 0;
 	m_HDMAEnded = 0;
 	m_HDMADoTransfer = 0;

@@ -14,12 +14,22 @@
 
 #include <string.h>
 
+/* AURORA_SAFE_CODE_PERF_V1_GSU_CPP
+ * $70-$71 is the only GSU Game Pak RAM bank interval. Keep the interval
+ * test in one unsigned subtraction so every ROM/cache path shares it. */
+static inline Bool _SNGSUBankIsRam(Uint8 uBank)
+{
+    return ((Uint32)uBank - 0x70u) < 2u;
+}
+
 extern "C" void DLog(const char *fmt, ...);
 
 SNGSU::SNGSU()
 {
     m_pRom = NULL; m_uRomSize = 0; m_uRomMask = 0;
     m_pRam = NULL; m_uRamSize = 0; m_uRamMask = 0;
+    /* AURORA_V8_GSU_REVISIONS: default to newest board for homebrew/unknown. */
+    m_Revision = SNGSU_REVISION_GSU2;
     m_ConfigVCR = 0x04;
     Reset();
 }
@@ -33,8 +43,20 @@ void SNGSU::SetMemory(Uint8 *pRom, Uint32 uRomSize, Uint8 *pRam, Uint32 uRamSize
 
 void SNGSU::SetVersion(Uint8 uVersion)
 {
-    m_ConfigVCR = (uVersion == 0x01) ? 0x01 : 0x04;
+    SetRevision((uVersion == 0x01) ? SNGSU_REVISION_MC1 : SNGSU_REVISION_GSU2);
+}
+
+void SNGSU::SetRevision(Uint8 uRevision)
+{
+    /* Known commercial silicon exposes VCR 01 (Mario Chip 1) or 04.
+       Keep a separate generation tag instead of inventing an unverified VCR. */
+    if (uRevision < SNGSU_REVISION_MC1 || uRevision > SNGSU_REVISION_GSU2)
+        uRevision = SNGSU_REVISION_GSU2;
+    m_Revision = uRevision;
+    m_ConfigVCR = (m_Revision == SNGSU_REVISION_MC1) ? 0x01 : 0x04;
     m_VCR = m_ConfigVCR;
+    if (m_Revision == SNGSU_REVISION_MC1)
+        m_CLSR = 0;              // MC1 has no usable 21-MHz mode
 }
 
 void SNGSU::Reset()
@@ -53,6 +75,10 @@ void SNGSU::Reset()
     m_VCR = m_ConfigVCR;
     m_CBR = 0;
     m_RomBuffer = 0; m_RomBufValid = FALSE;
+    /* AURORA_V8_GSU_CLOCK_ACCOUNTING */
+    m_StepClocks = 0;
+    m_ClockCarry = 0;
+    m_R14Modified = FALSE;
     m_Runaway = 0;
     m_WatchdogReported = FALSE;
 #if SNDBG_LOG
@@ -119,11 +145,15 @@ Uint32 SNGSU::RomOffset(Uint8 uBank, Uint16 uAddr) const
 
 Uint8 SNGSU::RomReadByte(Uint8 uBank, Uint16 uAddr) const
 {
-    // Na visao do GSU, $60-$7F seleciona a Game Pak RAM inclusive para
-    // opcodes (PBR) e para o prefetch de dados (ROMBR). O tamanho fisico da
-    // RAM faz esses bancos espelharem naturalmente em RamReadByte().
-    if (uBank >= 0x60 && uBank <= 0x7F)
+    /* AURORA_V81_GSU_MEMORY_DECODE
+     * $00-$3F is the 32-KiB ROM view mirrored into both halves of each
+     * 64-KiB bank; RomOffset() folds the address to 15 bits. $40-$5F is
+     * full-bank ROM. Only $70-$71 is Game Pak RAM. */
+    if (_SNGSUBankIsRam(uBank))
         return RamReadByte(((Uint32)(uBank & 1) << 16) | uAddr);
+    // With $70-$71 handled above, every remaining bank >= $60 is unmapped.
+    if (uBank >= 0x60)
+        return 0xFF;
 
     if (!m_pRom || !m_uRomSize) return 0xFF;
     Uint32 off = RomOffset(uBank, uAddr);
@@ -143,9 +173,13 @@ Uint8 SNGSU::RawCodeRead(Uint16 uAddr) const
 void SNGSU::UpdateRomBuffer()
 {
     if (!m_pRom || !m_uRomSize) { m_RomBuffer = 0xFF; m_RomBufValid = FALSE; return; }
+    /* Functional completion stays immediate for compatibility, but the
+       external bus time is now charged to the instruction that requested it. */
+    if (!_SNGSUBankIsRam(m_ROMBR))
+        ChargeClocks(MemoryClockCost());
     m_RomBuffer = RomReadByte(m_ROMBR, m_R[14]);
     m_RomBufValid = TRUE;
-    m_bRomRead = FALSE; // o modelo funcional completa o prefetch imediatamente
+    m_bRomRead = FALSE;
 }
 
 void SNGSU::FlushCodeCache()
@@ -167,6 +201,7 @@ void SNGSU::ClearDiagWindow()
 
 Uint8 SNGSU::RamReadByte(Uint32 uAddr) const
 {
+    ChargeClocks(MemoryClockCost());
     if (!m_pRam || !m_uRamSize) return 0xFF;
     if ((m_uRamSize & m_uRamMask) == 0)
         return m_pRam[uAddr & m_uRamMask];
@@ -175,6 +210,7 @@ Uint8 SNGSU::RamReadByte(Uint32 uAddr) const
 
 void SNGSU::RamWriteByte(Uint32 uAddr, Uint8 v)
 {
+    ChargeClocks(MemoryClockCost());
     if (!m_pRam || !m_uRamSize) return;
 #if SNDBG_DEEP
     m_Diag.RamWrites++;
@@ -222,28 +258,38 @@ Uint8 SNGSU::CodeRead(Uint16 pc)
     if (cacheOffset < 512)
     {
         Uint32 line = cacheOffset >> 4;
-        if (!(m_CacheValid & ((Uint32)1 << line)))
+        Bool bWasValid = (m_CacheValid & ((Uint32)1 << line)) != 0;
+        if (!bWasValid)
         {
 #if SNDBG_DEEP
             m_Diag.CacheMisses++;
 #endif
-            Uint16 base = (Uint16)(m_CBR + (line << 4));
+            Uint32 lineBase = line << 4;
+            Uint16 base = (Uint16)(m_CBR + lineBase);
+            Bool bCodeFromRam = _SNGSUBankIsRam(m_PBR);
             Uint32 i;
             for (i = 0; i < 16; i++)
-                m_Cache[(line << 4) + i] = RawCodeRead((Uint16)(base + i));
+            {
+                // RamReadByte() charges itself; ROM/unmapped bus does not.
+                if (!bCodeFromRam) ChargeClocks(MemoryClockCost());
+                m_Cache[lineBase + i] = RawCodeRead((Uint16)(base + i));
+            }
             m_CacheValid |= (Uint32)1 << line;
         }
-#if SNDBG_DEEP
         else
         {
+#if SNDBG_DEEP
             m_Diag.CacheHits++;
-        }
 #endif
+            ChargeClocks(CacheClockCost());
+        }
         b = m_Cache[cacheOffset];
     }
     else
     {
-        b = RawCodeRead(pc);
+        Bool bCodeFromRam = _SNGSUBankIsRam(m_PBR);
+        if (!bCodeFromRam) ChargeClocks(MemoryClockCost());
+        b = RawCodeRead(pc);       // RAM path charges in RamReadByte()
     }
     return b;
 }
@@ -340,6 +386,7 @@ void SNGSU::WriteReg(Uint16 uAddrLow, Uint8 uData)
         if (a == 0x301F)        // escrita em R15.MSB dispara GO
         {
             m_bGo = TRUE;
+            m_ClockCarry = 0;
             m_Runaway = 0;      // reinicia o watchdog a cada novo START
 #if SNDBG_LOG
             m_Diag.Starts++;
@@ -361,6 +408,7 @@ void SNGSU::WriteReg(Uint16 uAddrLow, Uint8 uData)
             if (wasGo && !m_bGo) { m_CBR = 0; FlushCodeCache(); }
             if (!wasGo && m_bGo)
             {
+                m_ClockCarry = 0;
                 m_Runaway = 0;
 #if SNDBG_LOG
                 m_Diag.Starts++;
@@ -384,7 +432,10 @@ void SNGSU::WriteReg(Uint16 uAddrLow, Uint8 uData)
     case 0x3034: m_PBR  = uData & 0x7F; FlushCodeCache(); break;
     case 0x3037: m_CFGR = uData; break;
     case 0x3038: m_SCBR = uData; break;
-    case 0x3039: m_CLSR = uData & 1; break;
+    case 0x3039:
+        /* AURORA_V8_GSU_MC1_CLOCK: MC1 is fixed to the low clock. */
+        m_CLSR = (m_Revision == SNGSU_REVISION_MC1) ? 0 : (uData & 1);
+        break;
     case 0x303A: m_SCMR = uData; break;
     default: break;
     }
@@ -418,7 +469,11 @@ void SNGSU::WriteRegister(Uint8 n, Uint16 val)
     }
 
     m_R[n] = val;
-    if (n == 14) UpdateRomBuffer();
+    /* AURORA_V8_GSU_R14_DEFER
+     * Internal GSU writes to R14 request the ROM-buffer update at instruction
+     * completion, avoiding spurious mid-op refills. CPU MMIO writes to R14
+     * remain immediate in WriteReg(). */
+    if (n == 14) m_R14Modified = TRUE;
 }
 
 //==========================================================================
@@ -452,10 +507,13 @@ Uint32 SNGSU::PixelTileNo(Uint8 x, Uint8 y) const
 }
 
 // Endereco (offset linear na Game Pak RAM) da linha de bitplanes do tile.
-Uint32 SNGSU::PixelRowAddr(Uint8 x, Uint8 y) const
+/* AURORA_SAFE_CODE_PERF_V1_GSU_CPP
+ * PixFlush/RPIX already decoded SCMR.MD to obtain bpp. Reuse it here instead
+ * of calling ScreenBpp() a second time for the same operation. */
+Uint32 SNGSU::PixelRowAddr(Uint8 x, Uint8 y, Int32 bpp) const
 {
     Uint32 tile = PixelTileNo(x, y);
-    Uint32 tileSize = (Uint32)(8 * ScreenBpp());          // 16/32/64
+    Uint32 tileSize = (Uint32)(8 * bpp);                  // 16/32/64
     return tile * tileSize + ((Uint32)m_SCBR << 10) + (Uint32)(y & 7) * 2;
 }
 
@@ -470,19 +528,53 @@ void SNGSU::PixFlush(Int32 nCache)
     Uint8 xbase = (Uint8)(offset << 3);
     Uint8 y = (Uint8)(offset >> 5);
     Int32  bpp = ScreenBpp();
-    Uint32 rowAddr = PixelRowAddr(xbase, y);
-    for (Int32 b = 0; b < bpp; b++) {
-        // plano b: par (b>>1) a offset (b>>1)*16, byte (b&1) dentro do par
-        Uint32 addr = rowAddr + (Uint32)((b >> 1) * 16 + (b & 1));
-        Uint8  byte = (flags == 0xFF) ? 0 : RamReadByte(addr);
-        for (Int32 i = 0; i < 8; i++) {
-            if (flags & (1 << i)) {
-                Uint8 mask = (Uint8)(1 << (7 - i));        // pixel 0 = bit7
-                if ((m_PixColor[nCache][i] >> b) & 1) byte |= mask;
-                else                          byte &= (Uint8)~mask;
-            }
+    Uint32 rowAddr = PixelRowAddr(xbase, y, bpp);
+    const Uint8 *pColor = m_PixColor[nCache];
+
+    /* AURORA_GSU_FULLPIX_FAST_V1
+     *
+     * PLOT entrega blocos completos de oito pixels com frequencia alta. No
+     * caminho antigo, mesmo flags==FF fazia 8 testes/branches por bitplane.
+     * Para um bloco completo nao existe byte antigo a preservar: monte o byte
+     * final diretamente. O caminho parcial abaixo fica byte-for-byte com a
+     * logica anterior (read/modify/write), portanto nenhuma aproximacao grafica
+     * ou mudanca de timing emulado e introduzida.
+     */
+    if (flags == 0xFF)
+    {
+        for (Int32 b = 0; b < bpp; b++)
+        {
+            Uint32 addr = rowAddr + (Uint32)((b >> 1) * 16 + (b & 1));
+            Uint8 byte = (Uint8)(
+                (((pColor[0] >> b) & 1u) << 7) |
+                (((pColor[1] >> b) & 1u) << 6) |
+                (((pColor[2] >> b) & 1u) << 5) |
+                (((pColor[3] >> b) & 1u) << 4) |
+                (((pColor[4] >> b) & 1u) << 3) |
+                (((pColor[5] >> b) & 1u) << 2) |
+                (((pColor[6] >> b) & 1u) << 1) |
+                (((pColor[7] >> b) & 1u) << 0));
+            RamWriteByte(addr, byte);
         }
-        RamWriteByte(addr, byte);
+    }
+    else
+    {
+        /* Legacy partial-row path: preserve untouched pixels exactly. */
+        for (Int32 b = 0; b < bpp; b++)
+        {
+            Uint32 addr = rowAddr + (Uint32)((b >> 1) * 16 + (b & 1));
+            Uint8 byte = RamReadByte(addr);
+            for (Int32 i = 0; i < 8; i++)
+            {
+                if (flags & (1 << i))
+                {
+                    Uint8 mask = (Uint8)(1 << (7 - i));
+                    if ((pColor[i] >> b) & 1) byte |= mask;
+                    else                          byte &= (Uint8)~mask;
+                }
+            }
+            RamWriteByte(addr, byte);
+        }
     }
     m_PixFlags[nCache] = 0;
 }
@@ -539,8 +631,9 @@ void SNGSU::Plot()
         PixMovePrimaryToSecondary();
         m_PixOffset[0] = offset;
     }
-    m_PixColor[0][x & 7] = color;
-    m_PixFlags[0] |= (Uint8)(1 << (x & 7));
+    Uint8 pixel = (Uint8)(x & 7);
+    m_PixColor[0][pixel] = color;
+    m_PixFlags[0] |= (Uint8)(1 << pixel);
     m_R[1]++;
 
     if (m_PixFlags[0] == 0xFF)
@@ -556,12 +649,13 @@ Uint16 SNGSU::Rpix()
     Uint8 x = (Uint8)(m_R[1] & 0xFF);
     Uint8 y = (Uint8)(m_R[2] & 0xFF);
     Int32 bpp = ScreenBpp();
-    Uint32 rowAddr = PixelRowAddr(x, y);
+    Uint32 rowAddr = PixelRowAddr(x, y, bpp);
+    Uint32 bitShift = 7u - ((Uint32)x & 7u);
     Uint16 color = 0;
     for (Int32 b = 0; b < bpp; b++) {
         Uint32 addr = rowAddr + (Uint32)((b >> 1) * 16 + (b & 1));
         Uint8  byte = RamReadByte(addr);
-        Uint8  bit  = (Uint8)((byte >> (7 - (x & 7))) & 1);
+        Uint8  bit  = (Uint8)((byte >> bitShift) & 1u);
         color |= (Uint16)(bit << b);
     }
     return color;
@@ -583,6 +677,7 @@ void SNGSU::ColorWrite(Uint8 src)
 
 SNGSU_ALWAYS_INLINE void SNGSU::Step()
 {
+    m_R14Modified = FALSE;
 #if SNDBG_DEEP
     m_Diag.Instructions++;
     m_Diag.CurrentJobInstructions++;
@@ -783,6 +878,7 @@ SNGSU_ALWAYS_INLINE void SNGSU::Step()
         WriteRegister(m_Dreg, hi);
         SetZSfromWord(hi);
         m_bCY = ((up >> 15) & 1) != 0;                 // CY = bit15 do produto
+        ChargeClocks(((m_CFGR & 0x20) ? 3 : 7) * CacheClockCost());
     }
     else if (op >= 0x80 && op <= 0x8F)       // MULT / UMULT / +#imm (low 16)
     {
@@ -795,6 +891,7 @@ SNGSU_ALWAYS_INLINE void SNGSU::Step()
             r = (Int32)(Int8)sr * b;
         }
         Uint16 res = (Uint16)r; SetZSfromWord(res); WriteRegister(m_Dreg, res);
+        if (!(m_CFGR & 0x20)) ChargeClocks(CacheClockCost());
     }
     else if (op >= 0xD0 && op <= 0xDE)       // INC Rn
     {
@@ -948,6 +1045,12 @@ SNGSU_ALWAYS_INLINE void SNGSU::Step()
     if (!bIsPrefix)
         ResetPrefix();
 
+    if (m_R14Modified)
+    {
+        m_R14Modified = FALSE;
+        UpdateRomBuffer();
+    }
+
     // R15 aponta para o byte que acabou de ser colocado no pipeline. Se a
     // instrucao nao escreveu o PC, avanca para o proximo endereco. STOP usa
     // esta mesma regra e por isso termina em $+2, como no silicio.
@@ -958,13 +1061,51 @@ SNGSU_ALWAYS_INLINE void SNGSU::Step()
 
 }
 
+/* AURORA_V81_GSU_RUN_GATE
+ * A cached next fetch can proceed without the external cartridge bus.
+ * Otherwise wait for SCMR.RON/RAN. Returning from Run() simply spends this
+ * scanline stalled; GO remains set so a later S-CPU SCMR write releases it. */
+Bool SNGSU::CanExecuteNow() const
+{
+    Uint16 off = (Uint16)(m_R[15] - m_CBR);
+    if (off < 512 && (m_CacheValid & ((Uint32)1 << (off >> 4))))
+        return TRUE;
+
+    if (m_PBR <= 0x5F)
+        return (m_SCMR & 0x10) != 0;  // RON
+    if (_SNGSUBankIsRam(m_PBR))
+        return (m_SCMR & 0x08) != 0;  // RAN
+    return FALSE;
+}
+
 void SNGSU::Run(Int32 nClocks)
 {
-    // Step e' o caminho mais quente dos jogos SuperFX (milhoes de chamadas
-    // por minuto). Mantê-lo visivel acima permite ao GCC incorporar o loop,
-    // removendo uma chamada C++ por instrucao emulada no EE do PS2.
-    while (m_bGo && nClocks-- > 0)
+    /* AURORA_V8_GSU_CLOCK_ACCOUNTING: Run
+     * Consume physical GSU clocks, not one unit per instruction. CodeRead
+     * and Game Pak RAM accesses charge the current instruction. If an
+     * instruction crosses the scanline boundary, carry only its excess so
+     * long-term clock rate remains stable without splitting the hot Step(). */
+    Int32 nBudget = nClocks - m_ClockCarry;
+    m_ClockCarry = 0;
+    if (nBudget <= 0)
+    {
+        m_ClockCarry = -nBudget;
+        return;
+    }
+
+    while (m_bGo && nBudget > 0)
+    {
+        if (!CanExecuteNow())
+            return;
+        m_StepClocks = 0;
         Step();
+        Int32 nCost = m_StepClocks;
+        if (nCost <= 0) nCost = CacheClockCost();
+        nBudget -= nCost;
+    }
+
+    if (nBudget < 0)
+        m_ClockCarry = -nBudget;
 }
 
 #undef SNGSU_ALWAYS_INLINE

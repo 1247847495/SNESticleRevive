@@ -442,7 +442,7 @@ static SNDSP1 *g_pSNDSP1_Instance = 0;
 SNDSP1::SNDSP1()
 {
     g_pSNDSP1_Instance = this;
-    m_bTargetYSubtract = FALSE;
+    /* AURORA_UPSTREAM_20260827_DSP1_OP28_REVISION_V1 */
     m_bOriginalDistanceBug = FALSE;
     Reset();
 }
@@ -545,9 +545,11 @@ static void DSP1_DoDistance(Int16 *in, Int16 *out, Bool bOriginalBug)
     Int16 d;
     if (bOriginalBug)
     {
-        /* DSP-1/DSP-1A op28 bug: the interpolation fraction is used as
-           the signed 16-bit value C<<6.  DSP-1B masks the sign bit and
-           thereby produces the mathematically corrected distance. */
+        /* AURORA_UPSTREAM_20260827_DSP1_OP28_REVISION_V1
+         * DSP-1/DSP-1A use C<<6 as a signed 16-bit interpolation
+         * fraction.  DSP-1B masks that sign bit, producing the corrected
+         * distance.  Cast through Uint16 before shifting: shifting a
+         * negative signed value would itself be undefined C++ behavior. */
         Int16 fraction = (Int16)((Uint16)C << 6);
         d = (Int16)((((Int32)(N2 - N1)) * fraction >> 15) + N1);
     }
@@ -997,10 +999,10 @@ void SNDSP1::Execute(Uint8 uCmd)
         DSP1_Normalize(C1, C, E);
         C = (Int16)(((Int32)DSP1_DenormalizeAndClip(C, E) * H) >> 15);
         Int16 X = (Int16)(m_CentreX + (Int16)(((Int32)C * m_CosAas) >> 15));
-        Int16 yHorizontal = (Int16)(((Int32)C * m_SinAas) >> 15);
-        Int16 Y = m_bTargetYSubtract
-            ? (Int16)(m_CentreY - yHorizontal)
-            : (Int16)(m_CentreY + yHorizontal);
+        /* AURORA_V85_DSP1_TARGET_Y_SIGN
+         * Target ($0E): horizontal screen displacement contributes
+         * CentreY - H*sin(Aas), matching the public DSP-1 algorithm. */
+        Int16 Y = (Int16)(m_CentreY - (Int16)(((Int32)C * m_SinAas) >> 15));
 
         V = (Int16)(V << 8);
         DSP1_Normalize((Int16)(((Int32)C1 * m_SecAZS_C1) >> 15), C, E1);

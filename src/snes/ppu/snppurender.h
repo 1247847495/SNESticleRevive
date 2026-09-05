@@ -36,6 +36,85 @@ enum
 #define SNPPU_BGFLAGS_FETCHPAL (2)
 #define SNPPU_BGFLAGS_OFFSET (4)
 
+/* AURORA_V85_SOFTWARE_HACKS_API
+ * Renderer/output compromises only. Defaults are the full V8.3 path. */
+enum
+{
+    SNPPU_HACK_COLOR_MATH_OFF = 1 << 0,
+    SNPPU_HACK_WINDOWS_OFF    = 1 << 1,
+    SNPPU_HACK_MODE7_HALF     = 1 << 2,
+    SNPPU_HACK_FRAME_SKIP     = 1 << 3,
+    SNPPU_HACK_ALL            = 0x0F
+};
+
+extern Uint8 g_SnesSoftwareLayerMask;
+extern Uint8 g_SnesSoftwareHackFlags;
+
+/* AURORA_OBJ_LIMIT_V1_2
+ * Level 0 keeps the untouched SNES limits. Scanline mode caps fetched OBJ
+ * tiles per line; Screen mode caps distinct visible OBJ for the whole screen. */
+enum
+{
+    SNPPU_OBJ_LIMIT_OFF = 0,
+    SNPPU_OBJ_LIMIT_LIGHT,
+    SNPPU_OBJ_LIMIT_MEDIUM,
+    SNPPU_OBJ_LIMIT_STRONG,
+    SNPPU_OBJ_LIMIT_EXTREME,
+    SNPPU_OBJ_LIMIT_HEAVY,
+    SNPPU_OBJ_LIMIT_INSANE,
+    SNPPU_OBJ_LIMIT_NUM
+};
+
+enum
+{
+    SNPPU_OBJ_LIMIT_MODE_SCANLINE = 0,
+    SNPPU_OBJ_LIMIT_MODE_SCREEN,
+    SNPPU_OBJ_LIMIT_MODE_NUM
+};
+
+extern Uint8 g_SnesObjLimitLevel;
+extern Uint8 g_SnesObjLimitMode;
+/* AURORA_OBJ_LIMIT_HOTPATH_V3 */
+extern Int32 g_SnesObjLimitTileBudget;
+extern Int32 g_SnesObjLimitScreenBudget;
+extern Uint32 g_SnesObjLimitFramePhase;
+
+_INLINE Uint8 SNPPURenderGetSoftwareLayerMask(void)
+{
+    return g_SnesSoftwareLayerMask;
+}
+_INLINE Uint8 SNPPURenderGetSoftwareHackFlags(void)
+{
+    return g_SnesSoftwareHackFlags;
+}
+
+void  SNPPURenderSetSoftwareLayerMask(Uint8 uMask);
+void  SNPPURenderSetSoftwareHackFlags(Uint8 uFlags);
+Bool  SNPPURenderShouldRenderFrame(void);
+void  SNPPURenderSetObjLimitLevel(Uint8 uLevel);
+_INLINE Uint8 SNPPURenderGetObjLimitLevel(void)
+{
+    return g_SnesObjLimitLevel;
+}
+void  SNPPURenderSetObjLimitMode(Uint8 uMode);
+
+/* AURORA_GS_VRAM_EPOCH_V4_2
+ * Recreate the lazy PS2 GS blender after a gsKit VRAM reallocation. */
+void  SNPPURenderInvalidateGsResources(void);
+
+_INLINE Uint8 SNPPURenderGetObjLimitMode(void)
+{
+    return g_SnesObjLimitMode;
+}
+_INLINE Int32 SNPPURenderGetObjTileBudget(void)
+{
+    return g_SnesObjLimitTileBudget;
+}
+_INLINE Int32 SNPPURenderGetObjScreenBudget(void)
+{
+    return g_SnesObjLimitScreenBudget;
+}
+
 enum 
 {
     SNPPU_BGWINDOW_BG1,
@@ -79,8 +158,15 @@ struct SnesRenderObjT
 };
 
 Bool _SnesPPUOBJVisibleX(Uint16 uPosX, Uint8 uWidth);
-Bool _SnesPPUOBJTileCountedX(Uint16 uObjectX, Int32 iTileX);
+_INLINE Bool _SnesPPUOBJTileCountedX(Uint16 uObjectX, Int32 iTileX)
+{
+	return ((uObjectX & 0x1FF) == 0x100) ||
+	       (iTileX > -8 && iTileX < 256);
+}
 
+/* AURORA_REVIVE_A06DD_OBJ_HOTPATH_20260829
+ * Equivalente à checagem _SnesPPUOBJTileCountedX para cada tile, mas calcula
+ * uma única faixa contígua. O X especial $100 continua contando o OBJ inteiro. */
 _INLINE void _SnesPPUOBJCountedTileRange(Uint16 uObjectX,
 	Int32 iObjectX, Uint8 uWidth, Int32 *pFirstTile, Int32 *pTileCount)
 {
@@ -88,8 +174,6 @@ _INLINE void _SnesPPUOBJCountedTileRange(Uint16 uObjectX,
 	Int32 iFirst = 0;
 	Int32 iEnd = nTiles;
 
-	/* O X especial $100 conta o OBJ inteiro. Para os demais, recortar o
-	   intervalo uma vez equivale ao teste de cada tile, pois X avanca em 8. */
 	if ((uObjectX & 0x1FF) != 0x100)
 	{
 		if (iObjectX <= -8)
@@ -214,6 +298,7 @@ private:
 	CRenderSurface	*m_pTarget;
 
     Uint8           m_nObjLine[SNPPU_MAXLINE];
+    Uint16          m_nObjTilePotential[SNPPU_MAXLINE];
     Uint8           m_ObjLine[SNPPU_MAXLINE][SNPPU_MAXOBJ];
 
     ISNPPUBlend    *m_pBlend;

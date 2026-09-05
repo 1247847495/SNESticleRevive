@@ -32,6 +32,19 @@ static Uint32   _GPFifo_nListQwords;
 static Uint32   _GPFifo_iCurList;
 static Bool     _GPFifo_bInited = FALSE;
 
+/* AURORA_COMPAT_GPFIFO_STATE */
+static Bool _GPFifo_bCompatFullCache = FALSE;
+
+void GPFifoSetCompatFullCache(Bool enabled)
+{
+    _GPFifo_bCompatFullCache = enabled ? TRUE : FALSE;
+}
+
+Bool GPFifoGetCompatFullCache(void)
+{
+    return _GPFifo_bCompatFullCache;
+}
+
 /* Kept for debugging the bridged gslist path. Marked unused so
    GCC stops warning about it; flip the call site in GPFifoPause to
    (re-)enable. */
@@ -49,6 +62,26 @@ static void _GPFifoDumpList(void)
 
 void GPFifoFlush(void)
 {
+    /* AURORA_GPFIFO_EMPTY_FASTPATH_V2
+     *
+     * GPFifoResume() begins a GSList and immediately opens one DMA CNT tag.
+     * Therefore GSListGetSize()==1 is the exact idle representation: there
+     * are no GIF commands and no REF payload after that open CNT.
+     *
+     * We still submit/drain gsKit because this function is the end-of-frame
+     * host flush. We simply avoid closing, cache-syncing, DMA-kicking,
+     * swapping and reopening a raw chain that contains no commands.
+     *
+     * Any actual blender/setup write advances the list beyond qword 1 and
+     * falls through to the historical Pause/Resume path unchanged. */
+    if (_GPFifo_bInited &&
+        GSListGetSize() == 1 &&
+        !GSListHasDmaRefs())
+    {
+        GSK_DrainForRawGif();
+        return;
+    }
+
     GPFifoPause();
     GPFifoResume();
 }
@@ -56,14 +89,17 @@ void GPFifoFlush(void)
 void GPFifoPause(void)
 {
     if (!_GPFifo_bInited) {
-        /* Nothing to flush - just make sure gsKit's queue is drained
-           so the blender's raw DMA chain has the GIF channel free. */
-        GSK_DrainAndWait();
+        /* Nothing to flush - just make sure gsKit's DMA has finished feeding
+           path 3 before a raw producer can use the same GIF channel.
+           AURORA_GS_RAWGIF_DRAIN_V1 */
+        GSK_DrainForRawGif();
         return;
     }
 
-    /* Make sure gsKit isn't mid-transfer on the GIF channel. */
-    GSK_DrainAndWait();
+    /* AURORA_GS_RAWGIF_DRAIN_V1
+     * Serialize the producer switch at GIF-DMA completion, not full GS
+     * raster completion. Command order remains FIFO on the same path 3. */
+    GSK_DrainForRawGif();
 
     /* close current dma cnt */
     GSDmaCntClose();
@@ -71,13 +107,43 @@ void GPFifoPause(void)
     /* add end tag */
     GSDmaEnd();
 
+    /* AURORA_V83_GPFIFO_RANGE_DCACHE
+     * GSK_DrainAndWait() above has already serialized gsKit and GIF DMA.
+     * The current bridge list is ordinarily just Begin/End GS register
+     * commands.  Writing back+invalidating the entire EE D-cache here threw
+     * away hot emulator state for a few dozen qwords.
+     *
+     * Keep a conservative future-proof guard: if GSDmaRef() was used, retain
+     * the old FlushCache(0), because the REF payload can live outside this
+     * list.  With no REF, synchronize only the qwords the DMAC will read. */
+    if (_GPFifo_bCompatFullCache || GSListHasDmaRefs())
+    {
+        /* Full compatibility mode restores the old whole-cache fallback. */
+        FlushCache(0);
+    }
+    else
+    {
+        Uint128 *pStart = GSListGetStart();
+        Int32 nQwords = GSListGetSize();
+        Uint32 nBytes = nQwords > 0 ? (Uint32)nQwords * sizeof(Uint128) : 0;
+        if (pStart && nBytes > 0)
+        {
+            /* The EE D-cache is 8 KiB.  Walking a range larger than the
+               complete cache cannot save work, so retain FlushCache(0) for
+               unusually large lists. */
+            if (nBytes >= 8192U)
+                FlushCache(0);
+            else
+                SyncDCache(pStart, (Uint8 *)pStart + nBytes - 1);
+        }
+    }
+
     /* end list */
     GSListEnd();
 
-    /* flush cache */
-    FlushCache(0);
-
-    /* wait for previous dma to finish */
+    /* Keep this second guard even though GSK_DrainAndWait already syncs GIF:
+       DmaSyncGIF has a bounded timeout in this project, so retaining it keeps
+       the pre-V8.3 failure tolerance exactly unchanged. */
     DmaSyncGIF();
 
     /* transfer current list */

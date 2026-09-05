@@ -1,8 +1,10 @@
+#include <libpad.h>
 #include <stdio.h>
 
 #include "types.h"
 #include "mainloop_install.h"
 #include "mainloop_input.h"
+#include "input.h"
 #include "mainloop_menu.h"
 #include "mainloop_iop.h"
 #include "mainloop_shared.h"
@@ -118,6 +120,7 @@ enum MainLoopStateManagerStorageE
         MAINLOOP_STATEMANAGER_MMCE0,
         MAINLOOP_STATEMANAGER_MMCE1,
         MAINLOOP_STATEMANAGER_HDD,
+        MAINLOOP_STATEMANAGER_ATA0,
 
         MAINLOOP_STATEMANAGER_STORAGE_NUM
 };
@@ -137,22 +140,28 @@ static const MainLoopStateManagerStorageT _MainLoop_StateManagerStorage[] =
         { "mc1:",   "mc1:/SNESticle/" },
         { "mmce0:", "mmce0:/SNESticle/" },
         { "mmce1:", "mmce1:/SNESticle/" },
-        { "\xe5\x86\x85\xe7\xbd\xae\xe7\xa1\xac\xe7\x9b\x98", "hdd0:" }	/* 内置硬盘 */
+        { "内置硬盘", "hdd0:" },
+        { "内置硬盘exFAT", "ata0:/SNESticle/states/" }
 };
 
 static Int32 _MainLoop_StateManagerStorageIndex =
         MAINLOOP_STATEMANAGER_MASS0;
-static char _MainLoop_StateManagerBrowseEntry[] =
-        "\xe6\xb5\x8f\xe8\xa7\x88\xe5\xad\x98\xe6\xa1\xa3\xe6\x96\x87\xe4\xbb\xb6";	/* 浏览存档文件 */
+
+static CScreen *_MainLoop_StateBrowserPreviousScreen = NULL;
+
+static char _MainLoop_StateManagerBrowseEntry[] = "浏览即时存档";
+static char _MainLoop_StateManagerBrowseSramEntry[] = "浏览SRAM存档";
+static char _MainLoop_StateManagerSramEntry[48];
 static char _MainLoop_StateManagerStorageEntry[48];
 static char _MainLoop_StateManagerSlotEntry[32];
-static char _MainLoop_StateManagerResetEntry[] =
-        "\xe9\x87\x8d\xe6\x96\xb0\xe9\x80\x89\xe6\x8b\xa9\xe5\xad\x98\xe6\xa1\xa3\xe4\xbd\x8d\xe7\xbd\xae";	/* 重新选择存档位置 */
+static char _MainLoop_StateManagerResetEntry[] = "重新询问存档位置";
 static char _MainLoop_StateManagerStatus[64];
 
 char *_MainLoopStateMenuEntries[] =
 {
         _MainLoop_StateManagerBrowseEntry,
+        _MainLoop_StateManagerBrowseSramEntry,
+        _MainLoop_StateManagerSramEntry,
         _MainLoop_StateManagerStorageEntry,
         _MainLoop_StateManagerSlotEntry,
         _MainLoop_StateManagerResetEntry,
@@ -176,6 +185,9 @@ static Bool _MainLoopStateManagerStorageAvailable(Int32 iStorage)
 
                 case MAINLOOP_STATEMANAGER_HDD:
                         return HddSupportIsEnabled() ? TRUE : FALSE;
+
+                case MAINLOOP_STATEMANAGER_ATA0:
+                        return AtaBdSupportIsEnabled() ? TRUE : FALSE;
 
                 default:
                         return TRUE;
@@ -233,14 +245,17 @@ void _MainLoopStateMenuRefresh()
         }
 
         _MainLoopStateManagerNormalizeStorage();
+        snprintf(_MainLoop_StateManagerSramEntry,
+                 sizeof(_MainLoop_StateManagerSramEntry),
+                 "SRAM存储: %s", MainLoopSramGetDeviceName());
         pQuickTarget = MainLoopStateHasDeviceChoice()
                 ? MainLoopStateGetDeviceName()
-                : "\xe6\x9c\xaa\xe9\x80\x89\xe6\x8b\xa9";	/* 未选择 */
+                : "未选择";
 
         snprintf(
                 _MainLoop_StateManagerStorageEntry,
                 sizeof(_MainLoop_StateManagerStorageEntry),
-                "\xe5\xad\x98\xe5\x82\xa8:%s",	/* 存储:%s */
+                "存储位置: %s",
                 _MainLoop_StateManagerStorage[
                         _MainLoop_StateManagerStorageIndex
                 ].pName
@@ -250,7 +265,7 @@ void _MainLoopStateMenuRefresh()
                 snprintf(
                         _MainLoop_StateManagerSlotEntry,
                         sizeof(_MainLoop_StateManagerSlotEntry),
-                        "\xe5\xbf\xab\xe6\x8d\xb7\xe5\xad\x98\xe6\xa1\xa3\xe4\xbd\x8d:1 (\xe8\x87\xaa\xe5\x8a\xa8)"	/* 快捷存档位:1 (自动) */
+                        "快速存档位: 1（自动）"
                 );
         }
         else
@@ -258,7 +273,7 @@ void _MainLoopStateMenuRefresh()
                 snprintf(
                         _MainLoop_StateManagerSlotEntry,
                         sizeof(_MainLoop_StateManagerSlotEntry),
-                        "\xe5\xbf\xab\xe6\x8d\xb7\xe5\xad\x98\xe6\xa1\xa3\xe4\xbd\x8d:%d",	/* 快捷存档位:%d */
+                        "快速存档位: %d",
                         (int)MainLoopStateGetSlot() + 1
                 );
         }
@@ -266,13 +281,13 @@ void _MainLoopStateMenuRefresh()
         snprintf(
                 _MainLoop_StateManagerStatus,
                 sizeof(_MainLoop_StateManagerStatus),
-                "\xe5\xbf\xab\xe6\x8d\xb7\xe7\x9b\xae\xe6\xa0\x87:%s",	/* 快捷目标:%s */
+                "快速存档目标: %s",
                 pQuickTarget
         );
         _MainLoop_pStateScreen->SetText(0, _MainLoop_StateManagerStatus);
-        _MainLoop_pStateScreen->SetText(1, "\xe2\x97\x8b:\xe6\x89\x93\xe5\xbc\x80  SELECT:\xe6\x96\x87\xe4\xbb\xb6\xe8\x8f\x9c\xe5\x8d\x95");
-        _MainLoop_pStateScreen->SetText(2, "\xe5\x88\xa0\xe9\x99\xa4\xe5\xb0\x86\xe6\xb8\x85\xe9\x99\xa4\xe4\xb8\xa4\xe4\xb8\xaa\xe5\xad\x98\xe6\xa1\xa3");
-        _MainLoop_pStateScreen->SetText(3, "\xe7\xa1\xac\xe7\x9b\x98:\xe8\xaf\xb7\xe5\x85\x88\xe9\x80\x89\xe6\x8b\xa9\xe5\x88\x86\xe5\x8c\xba");
+        _MainLoop_pStateScreen->SetText(1, "X: 打开  SELECT: 文件菜单");
+        _MainLoop_pStateScreen->SetText(2, "删除会同时移除双份存档");
+        _MainLoop_pStateScreen->SetText(3, "HDD: 请先选择分区");
 }
 
 int _MainLoopStateMenuEvent(Uint32 Type, Uint32 Parm1, void *Parm2)
@@ -286,41 +301,101 @@ int _MainLoopStateMenuEvent(Uint32 Type, Uint32 Parm1, void *Parm2)
         switch (Parm1)
         {
                 case 0:
-                        if ((_MainLoop_StateManagerStorageIndex ==
-                             MAINLOOP_STATEMANAGER_MC0 ||
-                             _MainLoop_StateManagerStorageIndex ==
-                             MAINLOOP_STATEMANAGER_MC1))
-                        {
-                                Int32 iPort =
-                                        _MainLoop_StateManagerStorageIndex ==
-                                        MAINLOOP_STATEMANAGER_MC0 ? 0 : 1;
+    if ((_MainLoop_StateManagerStorageIndex ==
+         MAINLOOP_STATEMANAGER_MC0 ||
+         _MainLoop_StateManagerStorageIndex ==
+         MAINLOOP_STATEMANAGER_MC1))
+    {
+        Int32 iPort =
+            _MainLoop_StateManagerStorageIndex ==
+            MAINLOOP_STATEMANAGER_MC0 ? 0 : 1;
 
-                                if (MemCardGetStatus(iPort) ==
-                                    MEMCARD_STATUS_UNFORMATTED)
-                                {
-                                        _MainLoopMemCardFormatPromptOpen(
-                                                iPort,
-                                                MAINLOOP_MEMCARDFORMAT_BROWSE
-                                        );
-                                        break;
-                                }
-                        }
-                        _MainLoopSetScreen(
-                                (CScreen *)_MainLoop_pStateBrowserScreen
-                        );
-                        _MainLoop_pStateBrowserScreen->SetDir(
-                                _MainLoop_StateManagerStorage[
-                                        _MainLoop_StateManagerStorageIndex
-                                ].pPath
-                        );
-                        break;
+        if (MemCardGetStatus(iPort) ==
+            MEMCARD_STATUS_UNFORMATTED)
+        {
+            _MainLoopMemCardFormatPromptOpen(
+                iPort,
+                MAINLOOP_MEMCARDFORMAT_BROWSE
+            );
+            break;
+        }
+    }
+
+    /* AURORA_RUNTIME_SAFE_STATE_BROWSER_V1_4_1
+     * Reuse the browser allocated once in MainLoopInit. Reallocating it on
+     * every visit leaked the old entry buffer and could exhaust EE RAM. */
+    if (!_MainLoop_pStateBrowserScreen)
+    {
+        MainLoopStatusPrintf(180, "存档浏览器不可用。");
+        break;
+    }
+
+    _MainLoop_StateBrowserPreviousScreen = _MainLoop_pStateScreen;
+    _MainLoop_pStateBrowserScreen->SetMsgFunc(
+        _MainLoopStateBrowserEvent
+    );
+    _MainLoop_pStateBrowserScreen->SetStateManager(TRUE);
+    _MainLoop_pStateBrowserScreen->SetSramManager(FALSE);
+
+    _MainLoopSetScreen(
+        (CScreen *)_MainLoop_pStateBrowserScreen
+    );
+
+    _MainLoop_pStateBrowserScreen->SetDir(
+        _MainLoop_StateManagerStorage[
+            _MainLoop_StateManagerStorageIndex
+        ].pPath
+    );
+    break;
 
                 case 1:
+{
+    if (!_MainLoop_pStateBrowserScreen)
+    {
+        MainLoopStatusPrintf(180, "SRAM浏览器不可用。");
+        break;
+    }
+
+    const Char *pSystemDir =
+        (_pSystem == _pNes) ? "NES" :
+        ((_pSystem == _pSega) ? "SEGA" : "SNES");
+
+    Char SramDir[1024];
+
+    _MainLoop_StateBrowserPreviousScreen =
+        _MainLoop_pStateScreen;
+
+    _MainLoop_pStateBrowserScreen->SetStateManager(FALSE);
+    _MainLoop_pStateBrowserScreen->SetSramManager(TRUE);
+
+    snprintf(
+        SramDir,
+        sizeof(SramDir),
+        "%s/%s/",
+        MainLoopSramGetBrowseRoot(),
+        pSystemDir
+    );
+
+    _MainLoopSetScreen(
+        (CScreen *)_MainLoop_pStateBrowserScreen
+    );
+
+    _MainLoop_pStateBrowserScreen->SetDir(SramDir);
+    break;
+}
+
+                case 2:
+                        MainLoopSramCycleDevice();
+                        VideoSettingsSave();
+                        _MainLoopStateMenuRefresh();
+                        break;
+
+                case 3:
                         _MainLoopStateManagerCycleStorage();
                         _MainLoopStateMenuRefresh();
                         break;
 
-                case 2:
+                case 4:
                         MainLoopStateCycleSlot();
                         if (MainLoopStateHasDeviceChoice())
                         {
@@ -329,12 +404,12 @@ int _MainLoopStateMenuEvent(Uint32 Type, Uint32 Parm1, void *Parm2)
                         _MainLoopStateMenuRefresh();
                         break;
 
-                case 3:
+                case 5:
                         MainLoopStateForgetDeviceChoice();
                         _MainLoopStateMenuRefresh();
                         MainLoopModalPrintf(
                                 45,
-                                "Next L2+X will ask the save location."
+                                "下次按 L2+X 将询问存档位置。"
                         );
                         break;
         }
@@ -342,21 +417,151 @@ int _MainLoopStateMenuEvent(Uint32 Type, Uint32 Parm1, void *Parm2)
         return 0;
 }
 
-static char _MainLoop_StateDeviceAutoEntry[] =
-        "\xe8\x87\xaa\xe5\x8a\xa8";	/* 自动 */
-static char _MainLoop_StateDeviceUSBEntry[] =
-        "U\xe7\x9b\x98 / mass";	/* U盘 / mass */
-static char _MainLoop_StateDeviceMCEntry[] =
-        "\xe8\xae\xb0\xe5\xbf\x86\xe5\x8d\xa1";	/* 记忆卡 */
+/* AURORA_STATE_CONFIRM_V1 */
+static char _MainLoop_StateConfirmNoEntry[]  = "否";
+static char _MainLoop_StateConfirmYesEntry[] = "是";
+static char *_MainLoop_StateConfirmEntries[] =
+{
+        _MainLoop_StateConfirmNoEntry,
+        _MainLoop_StateConfirmYesEntry,
+        NULL
+};
+static Bool _MainLoop_StateConfirmSave = FALSE;
+static Bool _MainLoop_StateConfirmArmed = FALSE;
+/* AURORA_AUDIO_UI_SOFT_TRANSITION_V2_20260901
+ * UI-only one-shot: tells the caller that YES already performed the complete
+ * save/load audio transition, so it must not issue an extra UiResume(). */
+static Bool _MainLoop_StateConfirmExecuted = FALSE;
+static CScreen *_MainLoop_StateConfirmPreviousScreen = NULL;
+
+static void _MainLoopStateConfirmPromptClose()
+{
+        CScreen *pReturn = _MainLoop_StateConfirmPreviousScreen;
+        if (!pReturn || pReturn == (CScreen *)_MainLoop_pStateConfirmScreen)
+                pReturn = (CScreen *)_MainLoop_pBrowserScreen;
+
+        _MainLoopInputSuppressUntilRelease();
+        _MainLoopSetScreen(pReturn);
+        _MainLoop_StateConfirmPreviousScreen = NULL;
+        _MainLoop_StateConfirmArmed = FALSE;
+        /* AURORA_AUDIO_UI_SOFT_TRANSITION_V1_20260901
+         * Isolated quick-state prompt: it never scheduled normal menu SRAM
+         * work or entered menu BGM, so do not route its close through
+         * _MenuEnable(FALSE), which performs a destructive audsrv hard-cut. */
+        _bMenu = FALSE;
+}
+
+void _MainLoopStateConfirmPromptOpen(Bool bSave)
+{
+        if (!_MainLoop_pStateConfirmScreen || _bMenu || !_pSystem)
+                return;
+
+        /* AURORA_AUDIO_UI_SOFT_TRANSITION_V1_20260901
+         * Audio was already soft-muted by the quick-state input path. */
+        _MainLoop_StateConfirmSave = bSave;
+        _MainLoop_StateConfirmArmed = FALSE;
+        _MainLoop_StateConfirmExecuted = FALSE;
+        _MainLoop_StateConfirmPreviousScreen = _MainLoop_pScreen;
+        _MainLoop_pStateConfirmScreen->SetEntries(_MainLoop_StateConfirmEntries);
+        _MainLoop_pStateConfirmScreen->SetSelection(0);
+        _MainLoop_pStateConfirmScreen->SetTitle(bSave ? "保存进度？" : "读取进度？");
+        _MainLoop_pStateConfirmScreen->SetText(0, "左右: 选择   X: 确认");
+        _MainLoop_pStateConfirmScreen->SetText(1, "默认: 否");
+        _MainLoop_pStateConfirmScreen->SetText(2, "");
+        _MainLoop_pStateConfirmScreen->SetText(3, "");
+
+        /* Do not call _MenuEnable(TRUE): quick-state confirmation must not
+           schedule the ordinary L2+R2 SRAM flush. */
+        _bMenu = TRUE;
+        _MainLoopSetScreen((CScreen *)_MainLoop_pStateConfirmScreen);
+}
+
+void _MainLoopStateConfirmPromptCancel()
+{
+        if (_MainLoop_pScreen == (CScreen *)_MainLoop_pStateConfirmScreen)
+                _MainLoopStateConfirmPromptClose();
+}
+
+/* AURORA_AUDIO_UI_SOFT_TRANSITION_V2_20260901 */
+Bool _MainLoopStateConfirmPromptConsumeExecuted()
+{
+        const Bool executed = _MainLoop_StateConfirmExecuted;
+        _MainLoop_StateConfirmExecuted = FALSE;
+        return executed;
+}
+
+void _MainLoopStateConfirmPromptInput(Uint32 buttons, Uint32 trigger)
+{
+        const Uint32 NeutralMask = PAD_LEFT | PAD_RIGHT | PAD_CROSS |
+            PAD_CIRCLE | PAD_START | PAD_L2 | PAD_R2;
+
+        if (_MainLoop_pScreen != (CScreen *)_MainLoop_pStateConfirmScreen)
+                return;
+
+        /* Hard input flush: no choice is accepted until one completely
+           neutral frame occurs after the opening L2+X/L2+O combination. */
+        if (!_MainLoop_StateConfirmArmed)
+        {
+                if (!(buttons & NeutralMask))
+                        _MainLoop_StateConfirmArmed = TRUE;
+                return;
+        }
+
+        if (trigger & PAD_CIRCLE)
+        {
+                _MainLoopStateConfirmPromptClose();
+                return;
+        }
+        _MainLoop_pStateConfirmScreen->Input(buttons, trigger);
+}
+
+int _MainLoopStateConfirmMenuEvent(Uint32 Type, Uint32 Parm1, void *Parm2)
+{
+        Bool bSave;
+        (void)Parm2;
+        if (Type != 1 || Parm1 > 1)
+                return 0;
+
+        bSave = _MainLoop_StateConfirmSave;
+        if (Parm1 == 0)
+        {
+                _MainLoopStateConfirmPromptClose();
+                return 0;
+        }
+
+        _MainLoopStateConfirmPromptClose();
+        _MainLoopQuickStateExecuteConfirmed(bSave);
+        _MainLoop_StateConfirmExecuted = TRUE;
+        return 0;
+}
+
+static char _MainLoop_StateDeviceAutoEntry[] = "自动";
+static char _MainLoop_StateDeviceUSBEntry[] = "USB存储";
+static char _MainLoop_StateDeviceMCEntry[] = "记忆卡";
 static char _MainLoop_StateDeviceMMCEEntry[] = "MMCE";
-static char _MainLoop_StateDeviceHDDEntry[] =
-        "\xe5\x86\x85\xe7\xbd\xae\xe7\xa1\xac\xe7\x9b\x98";	/* 内置硬盘 */
+static char _MainLoop_StateDeviceHDDEntry[] = "内置硬盘";
 static char *_MainLoop_StateDeviceEntries[MAINLOOP_STATEDEVICE_NUM + 1];
 static MainLoopStateDeviceE
         _MainLoop_StateDeviceMap[MAINLOOP_STATEDEVICE_NUM];
 static Int32 _MainLoop_StateDeviceEntryCount = 0;
-static CScreen *_MainLoop_StateDevicePreviousScreen = NULL;
 
+static CScreen *_MainLoop_StateDevicePreviousScreen = NULL;
+void _MainLoopStateBrowserReturn(void)
+{
+    if (_MainLoop_StateBrowserPreviousScreen)
+    {
+        _MainLoopSetScreen(
+            _MainLoop_StateBrowserPreviousScreen
+        );
+        _MainLoop_StateBrowserPreviousScreen = NULL;
+    }
+
+    if (_MainLoop_pStateBrowserScreen)
+    {
+        _MainLoop_pStateBrowserScreen->SetStateManager(FALSE);
+        _MainLoop_pStateBrowserScreen->SetSramManager(FALSE);
+    }
+}
 static void _MainLoopStateDeviceAddEntry(
         MainLoopStateDeviceE eDevice,
         char *pEntry)
@@ -434,16 +639,16 @@ void _MainLoopStateDevicePromptOpen()
         _MainLoop_pStateDeviceScreen->SetSelection(0);
         _MainLoop_pStateDeviceScreen->SetText(
                 0,
-                "\xe9\x80\x89\xe6\x8b\xa9\xe5\xbf\xab\xe9\x80\x9f\xe5\xad\x98\xe6\xa1\xa3\xe4\xbd\x8d\xe7\xbd\xae"
+                "选择快速存档位置"
         );
         _MainLoop_pStateDeviceScreen->SetText(
                 1,
-                "\xe2\x97\x8b:\xe9\x80\x89\xe6\x8b\xa9/\xe4\xbf\x9d\xe5\xad\x98/\xe8\xbf\x94\xe5\x9b\x9e"
+                "X: 选择并保存返回"
         );
-        _MainLoop_pStateDeviceScreen->SetText(2, "X:\xe5\x8f\x96\xe6\xb6\x88");
+        _MainLoop_pStateDeviceScreen->SetText(2, "O: 取消");
         _MainLoop_pStateDeviceScreen->SetText(
                 3,
-                "\xe4\xb9\x8b\xe5\x90\x8e\xe5\x8f\xaf\xe5\x9c\xa8\xe5\xad\x98\xe6\xa1\xa3\xe7\xae\xa1\xe7\x90\x86\xe4\xb8\xad\xe4\xbf\xae\xe6\x94\xb9"
+                "之后可在存档管理中更改"
         );
 
         _MainLoop_StateDevicePreviousScreen = _MainLoop_pScreen;
@@ -480,15 +685,26 @@ int _MainLoopStateDeviceMenuEvent(
                 return 0;
         }
 
+        /* AURORA_FINAL_V1_1_UI_CD_STORAGE_BARRIER_20260901
+         * The chooser UI is intentionally instant. Quiesce only after X
+         * confirms a device, before state.cfg or state payload touches disk. */
+        if (!MainLoopCdUiQuiesce())
+        {
+                MainLoopStatusPrintf(
+                        120, "CD读取忙，保存已推迟。");
+                return 1;
+        }
+
         MainLoopStateSetDevice(_MainLoop_StateDeviceMap[Parm1]);
         MainLoopStateSettingsSave();
 
         MainLoopModalPrintf(
                 1,
-                "Saving state slot %d...",
+                "正在保存到存档位 %d...",
                 (int)MainLoopStateGetSlot() + 1
         );
         bOK = _MainLoopSaveState();
+        MainLoopCdUiResume();
         _MainLoopStateMenuRefresh();
 
         if (!bOK && MainLoopStateGetUnformattedCard() >= 0)
@@ -513,7 +729,7 @@ int _MainLoopStateDeviceMenuEvent(
 }
 
 static char _MainLoop_MemCardFormatEntry[48];
-static char _MainLoop_MemCardFormatCancelEntry[] = "No - Cancel";
+static char _MainLoop_MemCardFormatCancelEntry[] = "否 - 取消";
 static char *_MainLoop_MemCardFormatEntries[] =
 {
         _MainLoop_MemCardFormatEntry,
@@ -569,7 +785,7 @@ void _MainLoopMemCardFormatPromptOpen(
         snprintf(
                 _MainLoop_MemCardFormatEntry,
                 sizeof(_MainLoop_MemCardFormatEntry),
-                "YES - Format mc%d:",
+                "是 - 格式化 mc%d:",
                 (int)iPort
         );
         _MainLoop_pMemCardFormatScreen->SetEntries(
@@ -580,20 +796,20 @@ void _MainLoopMemCardFormatPromptOpen(
         _MainLoop_pMemCardFormatScreen->SetText(
                 0,
                 iPort == 0
-                        ? "mc0: is not formatted"
-                        : "mc1: is not formatted"
+                        ? "mc0: 未格式化"
+                        : "mc1: 未格式化"
         );
         _MainLoop_pMemCardFormatScreen->SetText(
                 1,
-                "\xe6\xa0\xbc\xe5\xbc\x8f\xe5\x8c\x96\xe5\xb0\x86\xe6\xb8\x85\xe9\x99\xa4\xe6\x95\xb4\xe4\xb8\xaa\xe8\xae\xb0\xe5\xbf\x86\xe5\x8d\xa1"
+                "格式化将清空整张记忆卡"
         );
         _MainLoop_pMemCardFormatScreen->SetText(
                 2,
-                "\xe9\x80\x89\xe6\x8b\xa9YES\xef\xbc\x8c\xe7\x84\xb6\xe5\x90\x8e\xe6\x8c\x89\xe2\x97\x8b"
+                "选择“是”后再按 X"
         );
         _MainLoop_pMemCardFormatScreen->SetText(
                 3,
-                "X:\xe5\xae\x89\xe5\x85\xa8\xe5\x8f\x96\xe6\xb6\x88"
+                "O: 安全取消"
         );
 
         if (_MainLoop_MemCardFormatResumeGame)
@@ -624,6 +840,7 @@ int _MainLoopMemCardFormatMenuEvent(
 {
         Char SaveDirectory[32];
         Bool bOK = FALSE;
+        Bool bCdIoHeld = FALSE; /* AURORA_FINAL_V1_2_STORAGE_CLOSURE_20260901 */
         CScreen *pNextScreen = NULL;
         Int32 iPort = _MainLoop_MemCardFormatPort;
 
@@ -639,17 +856,39 @@ int _MainLoopMemCardFormatMenuEvent(
                 return 1;
         }
 
-        MainLoopModalPrintf(1, "Formatting mc%d:...", (int)iPort);
+        /* AURORA_FINAL_V1_2_STORAGE_CLOSURE_20260901
+         * If this prompt came directly from gameplay (quick-save failure),
+         * the previous state attempt already released its temporary CD hold.
+         * Re-acquire only for the destructive storage transaction. If the
+         * prompt came from the normal menu, that menu already owns quiesce
+         * and must keep owning it across this nested screen. */
+        if (_MainLoop_MemCardFormatResumeGame)
+        {
+                if (!MainLoopCdUiQuiesce())
+                {
+                        MainLoopStatusPrintf(
+                                120, "CD读取忙，格式化已推迟。");
+                        return 1;
+                }
+                bCdIoHeld = TRUE;
+        }
+
+        MainLoopModalPrintf(1, "正在格式化 mc%d:...", (int)iPort);
         if (!MemCardFormat(iPort))
         {
+                if (bCdIoHeld)
+                {
+                        MainLoopCdUiResume();
+                        bCdIoHeld = FALSE;
+                }
                 MainLoopStatusPrintf(
                         180,
-                        "Could not format mc%d:.",
+                        "无法格式化 mc%d:",
                         (int)iPort
                 );
                 _MainLoop_pMemCardFormatScreen->SetText(
                         3,
-                        "Format failed - X: cancel"
+                        "格式化失败 - O: 取消"
                 );
                 return 1;
         }
@@ -694,6 +933,12 @@ int _MainLoopMemCardFormatMenuEvent(
                         break;
         }
 
+        if (bCdIoHeld)
+        {
+                MainLoopCdUiResume();
+                bCdIoHeld = FALSE;
+        }
+
         _MainLoopMemCardFormatPromptFinish(pNextScreen);
         MainLoopStatusPrintf(
                 bOK ? 120 : 180,
@@ -702,8 +947,8 @@ int _MainLoopMemCardFormatMenuEvent(
                         MAINLOOP_MEMCARDFORMAT_STATE_SAVE
                         ? MainLoopStateGetLastMessage()
                         : (bOK
-                           ? "Memory card formatted."
-                           : "Memory card formatted, but save failed.")
+                           ? "记忆卡已格式化。"
+                           : "记忆卡已格式化，但保存失败。")
         );
         return 1;
 }

@@ -94,7 +94,6 @@ extern "C" Int32 SNCPUExecute_ASM(SNCpuT *pCpu);
 #include "emurom.h"
 
 #include "mainloop_install.h"
-#include "embedded_irx.h"
 
 int _MainLoopInstallCallback(char *pDestName, char *pSrcName, int Position, int Total)
 {
@@ -147,24 +146,11 @@ void _AddTitleDB(char *pPath)
 	   the disc is reopened; no explicit CDVD_FlushCache() RPC is
 	   needed. */
 
-	/* Install Menu can be opened without visiting the ROM browser first, so
-	   this explicit disc action must also trigger the lazy CDFS stack. */
-	if (!CdfsIsLoaded())
-	{
-		MainLoopModalPrintf(1, "CD/DVD: Starting driver...");
-		if (CdfsLoadEmbeddedIrx() < 0)
-		{
-			MainLoopModalPrintf(60*3, "CD/DVD driver failed (%d).",
-			                    CdfsGetLastError());
-			return;
-		}
-	}
-
 	pFile = fopen("cdfs:/SYSTEM.CNF", "rt");
 //	pFile = fopen("host:/SYSTEM.CNF", "rt");
 	if (!pFile)
 	{
-		MainLoopModalPrintf(60*3, "Unable to open SYSTEM.CNF on cd.");
+		MainLoopModalPrintf(60*3, "无法读取光盘上的SYSTEM.CNF。");
 		return;
 	}
 	while (fgets(str, sizeof(str), pFile))
@@ -185,10 +171,10 @@ void _AddTitleDB(char *pPath)
 				// add to title.db
 				if (add_title_db(pPath, pFileStart)==0)
 				{
-					MainLoopModalPrintf(60*3, "%s added to mc0:title.db", pFileStart);
+					MainLoopModalPrintf(60*3, "%s 已添加到 mc0:title.db", pFileStart);
 				} else
 				{
-					MainLoopModalPrintf(60*3, "Unable to add to %s", pPath);
+					MainLoopModalPrintf(60*3, "无法添加到 %s", pPath);
 				}
 				fclose(pFile);
 				return;
@@ -197,7 +183,7 @@ void _AddTitleDB(char *pPath)
 	}
 	fclose(pFile);
 
-	MainLoopModalPrintf(60*3, "Unable to find PSX ELF");
+	MainLoopModalPrintf(60*3, "未找到PSX ELF");
 }
 
 

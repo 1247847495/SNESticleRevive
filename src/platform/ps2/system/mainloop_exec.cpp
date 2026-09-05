@@ -28,12 +28,22 @@ Bool _ExecuteSnes(CRenderSurface *pSurface, CMixBuffer *pMixBuffer, Emu::SysInpu
 
             #if !MAINLOOP_SNESSTATEDEBUG
 //            pMixBuffer=NULL;
-//            SNCPUSetExecuteFunc(SNCPUExecute_C);
-            SNCPUSetExecuteFunc(SNCPUExecute_ASM);
-            SNSPCSetExecuteFunc(SNSPCExecute_C);
+            /* AURORA_RUNTIME_LEAN_V1_SNES_EXEC_20260824
+             * CPU overclock selection is gone, so these two executor pointers
+             * are process-lifetime constants in the normal SNESticle path.
+             * Configure them once instead of rewriting them every frame. */
+            static Bool s_bAuroraExecutorsConfigured = FALSE;
+            if (!s_bAuroraExecutorsConfigured)
+            {
+                SNCPUSetExecuteFunc(SNCPUExecute_ASM);
+                SNSPCSetExecuteFunc(SNSPCExecute_C);
+                s_bAuroraExecutorsConfigured = TRUE;
+            }
 
 		    PROF_ENTER("SnesExecuteFrame");
-  		    _pSystem->ExecuteFrame(pInput, pSurface, pMixBuffer, eMode);
+			/* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2: caller owns the one-shot
+			 * NULL surface decision; CPU/SPC still execute every frame. */
+		    _pSystem->ExecuteFrame(pInput, pSurface, pMixBuffer, eMode);
 		    PROF_LEAVE("SnesExecuteFrame");
             #else
 

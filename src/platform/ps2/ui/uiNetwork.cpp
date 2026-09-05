@@ -15,26 +15,8 @@
    filesystem.  Keep its convenient tab and IP editor, but make the screen
    configure the read-only SMB browser that users actually need. */
 
-/* OPL-style virtual keyboard: character pages shown as a 12x4 grid.
-   The last two cells of every page are the SP (space) and DEL keys. */
-#define SMBKB_COLS   12
-#define SMBKB_ROWS   4
-#define SMBKB_CELLS  (SMBKB_COLS * SMBKB_ROWS)
-#define SMBKB_SP     (SMBKB_CELLS - 2)
-#define SMBKB_DEL    (SMBKB_CELLS - 1)
-#define SMBKB_PAGES  2
-
-static const char kSmbKbPages[SMBKB_PAGES][SMBKB_CELLS - 1] = {
-    "1234567890-_"  /* 12 */
-    "qwertyuiop[]"  /* 12 */
-    "asdfghjkl;'."  /* 12 */
-    "zxcvbnm,\\/",  /* 10 */
-
-    "!@#$%^&*()+"   /* 12 */
-    "QWERTYUIOP{}"  /* 12 */
-    "ASDFGHJKL:\"~" /* 12 */
-    "ZXCVBNM<>?"    /* 10 */
-};
+static const char kSmbTextChars[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 _-.$@!#%&()+,.;=[]^{}~";
 
 static void SmbCenter(int x, int y, const char *text)
 {
@@ -80,8 +62,6 @@ CNetworkScreen::CNetworkScreen()
     m_iDigitIP = -1;
     m_iEditField = -1;
     m_iTextCursor = 0;
-    m_iKbPage = 0;
-    m_iKbCell = 0;
     m_bLoaded = FALSE;
     SmbConfigDefaults(&m_Config);
     SetEditIP(m_Config.serverIp);
@@ -163,7 +143,6 @@ void CNetworkScreen::BeginTextEdit(int field)
     text = GetEditText(field, &maxLength);
     (void)maxLength;
     m_iTextCursor = strlen(text);
-    m_iKbCell = 0;
 }
 
 void CNetworkScreen::InputIP(Uint32 trigger)
@@ -203,65 +182,67 @@ void CNetworkScreen::InputText(Uint32 trigger)
     char *text;
     int maxLength;
     int length;
-    int row;
-    int col;
+    int charsetLength = strlen(kSmbTextChars);
 
     text = GetEditText(m_iEditField, &maxLength);
+    length = strlen(text);
 
-    /* Triangle switches between the character pages. */
-    if (trigger & PAD_TRIANGLE)
-        m_iKbPage = (m_iKbPage + 1) % SMBKB_PAGES;
-
-    row = m_iKbCell / SMBKB_COLS;
-    col = m_iKbCell % SMBKB_COLS;
     if (trigger & PAD_LEFT)
     {
-        --col;
-        if (col < 0) col = SMBKB_COLS - 1;
+        if (m_iTextCursor > 0) --m_iTextCursor;
     }
     if (trigger & PAD_RIGHT)
     {
-        ++col;
-        if (col >= SMBKB_COLS) col = 0;
+        if (m_iTextCursor < length) ++m_iTextCursor;
     }
-    if (trigger & PAD_UP)
-    {
-        --row;
-        if (row < 0) row = SMBKB_ROWS - 1;
-    }
-    if (trigger & PAD_DOWN)
-    {
-        ++row;
-        if (row >= SMBKB_ROWS) row = 0;
-    }
-    m_iKbCell = row * SMBKB_COLS + col;
 
-    if (trigger & (PAD_CROSS | PAD_SQUARE))
+    if (trigger & (PAD_UP | PAD_DOWN))
     {
-        int wantDelete = (trigger & PAD_SQUARE) || m_iKbCell == SMBKB_DEL;
+        int character = 0;
+        int direction = (trigger & PAD_UP) ? 1 : -1;
 
-        length = strlen(text);
-        if (wantDelete)
+        if (m_iTextCursor == length && length < maxLength)
         {
-            if (length > 0)
-                text[length - 1] = '\0';
+            text[length++] = kSmbTextChars[0];
+            text[length] = '\0';
         }
+        if (m_iTextCursor < length)
+        {
+            const char *found = strchr(kSmbTextChars, text[m_iTextCursor]);
+            if (found) character = found - kSmbTextChars;
+            character = (character + direction + charsetLength) % charsetLength;
+            text[m_iTextCursor] = kSmbTextChars[character];
+        }
+    }
+
+    if (trigger & PAD_SQUARE)
+    {
+        if (length > 0)
+        {
+            if (m_iTextCursor >= length) m_iTextCursor = length - 1;
+            memmove(text + m_iTextCursor, text + m_iTextCursor + 1,
+                    length - m_iTextCursor);
+            --length;
+            if (m_iTextCursor > length) m_iTextCursor = length;
+        }
+    }
+
+    if (trigger & PAD_CROSS)
+    {
+        length = strlen(text);
+        if (m_iTextCursor < length) ++m_iTextCursor;
         else if (length < maxLength)
         {
-            text[length] = (m_iKbCell == SMBKB_SP)
-                ? ' '
-                : kSmbKbPages[m_iKbPage][m_iKbCell];
+            text[length] = kSmbTextChars[0];
             text[length + 1] = '\0';
+            m_iTextCursor = length;
         }
-        m_iTextCursor = strlen(text);
     }
 
-    if (trigger & PAD_START)
+    if (trigger & (PAD_TRIANGLE | PAD_START))
     {
         if (m_iEditField == 2 && !m_Config.share[0])
             strcpy(m_Config.share, "ROMS");
-        if (m_iEditField == 3 && !m_Config.user[0])
-            strcpy(m_Config.user, "GUEST");
         m_iEditField = -1;
     }
 }
@@ -269,7 +250,18 @@ void CNetworkScreen::InputText(Uint32 trigger)
 void CNetworkScreen::Input(Uint32 buttons, Uint32 trigger)
 {
     (void)buttons;
-    LoadConfig();
+
+    /* AURORA_NETWORK_LAZY_OPTIONS_V1_4
+     * Merely visiting the Network tab must never probe MC/USB/MMCE/CDFS.
+     * X/Start explicitly opts in to the one-time config scan. m_bLoaded
+     * already persists for the lifetime of this screen, so revisits in the
+     * same emulator run remain instant. */
+    if (!m_bLoaded)
+    {
+        if (trigger & (PAD_CROSS | PAD_START))
+            LoadConfig();
+        return;
+    }
 
     if (m_iDigitIP >= 0)
     {
@@ -305,7 +297,7 @@ void CNetworkScreen::Input(Uint32 buttons, Uint32 trigger)
         }
         else if (m_iSelect == 1) m_Config.serverPort = 445;
         else if (m_iSelect == 2) strcpy(m_Config.share, "ROMS");
-        else if (m_iSelect == 3) strcpy(m_Config.user, "GUEST");
+        else if (m_iSelect == 3) m_Config.user[0] = 0;
         else if (m_iSelect == 4) m_Config.password[0] = '\0';
     }
 
@@ -320,12 +312,12 @@ void CNetworkScreen::Input(Uint32 buttons, Uint32 trigger)
         else if (m_iSelect == 5)
         {
             CommitEditIP();
-            MainLoopModalPrintf(1, "SMB:\xe4\xbf\x9d\xe5\xad\x98\xe9\x85\x8d\xe7\xbd\xae\xe4\xb8\xad...");
+            MainLoopModalPrintf(1, "SMB: 正在保存配置...");
             if (SmbSaveAndConnect(&m_Config) == 0)
-                MainLoopModalPrintf(60 * 2, "SMB:\xe5\xb7\xb2\xe8\xbf\x9e\xe6\x8e\xa5\n%s",
+                MainLoopModalPrintf(60 * 2, "SMB: 已连接\n%s",
                                     SmbGetConfigPath());
             else
-                MainLoopModalPrintf(60 * 3, "SMB: %s (error %d)",
+                MainLoopModalPrintf(60 * 3, "SMB: %s（错误 %d）",
                                     SmbGetStatusText(), SmbGetLastError());
             VideoSettingsSave();
         }
@@ -334,7 +326,7 @@ void CNetworkScreen::Input(Uint32 buttons, Uint32 trigger)
             BgmIOBegin();
             SmbDisconnect();
             BgmIOEnd();
-            MainLoopModalPrintf(60, "SMB:\xe5\xb7\xb2\xe6\x96\xad\xe5\xbc\x80");
+            MainLoopModalPrintf(60, "SMB: 已断开");
         }
     }
 
@@ -373,63 +365,6 @@ void CNetworkScreen::DrawIP(int x, int y)
     }
 }
 
-void CNetworkScreen::DrawKeyboard(int y)
-{
-    static const char *kLabels[5] = {
-        "", "",
-        "\xe5\x85\xb1\xe4\xba\xab\xe5\x90\x8d",  /* 共享名 */
-        "\xe7\x94\xa8\xe6\x88\xb7\xe5\x90\x8d",  /* 用户名 */
-        "\xe5\xaf\x86\xe7\xa0\x81"               /* 密码 */
-    };
-    char display[80];
-    char pageLabel[24];
-    char *text;
-    int maxLength;
-    int row;
-    int col;
-
-    text = GetEditText(m_iEditField, &maxLength);
-    m_iTextCursor = strlen(text);
-    BuildDisplayText(display, sizeof(display), text, m_iEditField == 4, 1);
-    snprintf(pageLabel, sizeof(pageLabel), "%d/%d %s", m_iKbPage + 1,
-             SMBKB_PAGES, m_iKbPage ? "ABC" : "abc");
-
-    FontColor4f(0.55f, 0.55f, 0.55f, 1.0f);
-    FontPuts(12, y, kLabels[m_iEditField]);
-    FontColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-    FontPuts(76, y, display);
-    FontColor4f(0.3f, 0.8f, 0.8f, 1.0f);
-    FontPuts(244 - FontGetStrWidth(pageLabel), y, pageLabel);
-
-    y += 13;
-    for (row = 0; row < SMBKB_ROWS; ++row)
-    {
-        int cy = y + row * 12;
-        for (col = 0; col < SMBKB_COLS; ++col)
-        {
-            int cell = row * SMBKB_COLS + col;
-            int cx = 8 + col * 20;
-            char label[2] = { 0, 0 };
-            const char *draw;
-
-            if (cell == SMBKB_SP)       draw = "SP";
-            else if (cell == SMBKB_DEL) draw = "DEL";
-            else
-            {
-                label[0] = kSmbKbPages[m_iKbPage][cell];
-                draw = label;
-            }
-            if (cell == m_iKbCell)
-            {
-                PolyColor4f(0.0f, 0.5f, 0.0f, 0.5f);
-                PolyRect(cx, cy, 19, 11);
-            }
-            FontColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-            FontPuts(cx + (19 - FontGetStrWidth(draw)) / 2, cy + 2, draw);
-        }
-    }
-}
-
 void CNetworkScreen::BuildDisplayText(char *output, int outputSize,
                                       const char *text, int password,
                                       int editing)
@@ -455,7 +390,6 @@ void CNetworkScreen::BuildDisplayText(char *output, int outputSize,
         output[out++] = ']';
     }
     output[out] = '\0';
-    if (!output[0]) strcpy(output, password ? "\xe8\xae\xbf\xe5\xae\xa2" : "(\xe7\xa9\xba)");
 }
 
 void CNetworkScreen::Draw()
@@ -468,7 +402,23 @@ void CNetworkScreen::Draw()
     const char *path;
     int y = 15;
 
-    LoadConfig();
+    FontSelect(0);
+
+    /* AURORA_NETWORK_LAZY_OPTIONS_V1_4_DRAW
+     * Keep the first visit purely visual. No filesystem/network/config
+     * probing happens until the user explicitly asks for the options. */
+    if (!m_bLoaded)
+    {
+        SmbHeader(y, "SMB网络");
+        y += 34;
+        FontColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+        SmbCenter(128, y, "按 X 显示网络选项");
+        y += 15;
+        FontColor4f(0.55f, 0.55f, 0.55f, 1.0f);
+        SmbCenter(128, y, "");
+        return;
+    }
+
     snprintf(port, sizeof(port), "%d", m_Config.serverPort);
     BuildDisplayText(share, sizeof(share), m_Config.share, 0,
                      m_iEditField == 2);
@@ -478,53 +428,46 @@ void CNetworkScreen::Draw()
                      m_iEditField == 4);
 
     FontSelect(0);
-    SmbHeader(y, "SMB\xe7\xbd\x91\xe7\xbb\x9c");
+    SmbHeader(y, "SMB网络");
     y += 15;
 
     FontColor4f(0.55f, 0.55f, 0.55f, 1.0f);
-    FontPuts(50, y, "\xe7\x8a\xb6\xe6\x80\x81");
+    FontPuts(50, y, "状态");
     FontColor4f(SmbIsMounted() ? 0.3f : 1.0f,
                 SmbIsMounted() ? 1.0f : 0.85f, 0.3f, 1.0f);
     FontPuts(126, y, SmbGetStatusText());
     y += 15;
 
-    SmbHeader(y, "\xe6\x9c\x8d\xe5\x8a\xa1\xe5\x99\xa8/\xe5\x85\xb1\xe4\xba\xab");
+    SmbHeader(y, "服务器 / 共享");
     y += 13;
-    SmbRow(y, 0, m_iSelect, "\xe6\x9c\x8d\xe5\x8a\xa1\xe5\x99\xa8IP", "");
+    SmbRow(y, 0, m_iSelect, "服务器IP", "");
     FontColor4f(1.0f, 1.0f, 1.0f, 1.0f);
     DrawIP(126, y); y += 12;
-    SmbRow(y, 1, m_iSelect, "\xe7\xab\xaf\xe5\x8f\xa3", port); y += 12;
-    SmbRow(y, 2, m_iSelect, "\xe5\x85\xb1\xe4\xba\xab\xe5\x90\x8d", share); y += 12;
-    SmbRow(y, 3, m_iSelect, "\xe7\x94\xa8\xe6\x88\xb7\xe5\x90\x8d", user); y += 12;
-    SmbRow(y, 4, m_iSelect, "\xe5\xaf\x86\xe7\xa0\x81", password); y += 15;
+    SmbRow(y, 1, m_iSelect, "端口", port); y += 12;
+    SmbRow(y, 2, m_iSelect, "共享名", share); y += 12;
+    SmbRow(y, 3, m_iSelect, "用户名", user); y += 12;
+    SmbRow(y, 4, m_iSelect, "密码", password); y += 15;
 
-    if (m_iEditField >= 0)
+    SmbHeader(y, "操作"); y += 13;
+    SmbAction(y, 5, m_iSelect, "保存并连接"); y += 12;
+    SmbAction(y, 6, m_iSelect, "断开连接");
+
+    y = 183;
+    FontColor4f(0.6f, 0.6f, 0.6f, 1.0f);
+    if (m_iDigitIP >= 0)
     {
-        DrawKeyboard(y);
-
-        y = 190;
-        FontColor4f(0.6f, 0.6f, 0.6f, 1.0f);
-        SmbCenter(128, y,
-            "X:\xe8\xbe\x93\xe5\x85\xa5  \xe2\x96\xa1:\xe5\x88\xa0\xe9\x99\xa4  \xe2\x96\xb3:\xe6\x8d\xa2\xe9\xa1\xb5  START:\xe5\xae\x8c\xe6\x88\x90");
+        SmbCenter(128, y, "左右:切换组  上下:调数值"); y += 11;
+        SmbCenter(128, y, "X/△: 完成");
+    }
+    else if (m_iEditField >= 0)
+    {
+        SmbCenter(128, y, "左右:移光标  上下:改字符"); y += 11;
+        SmbCenter(128, y, "X:下一个 □:删除 △:完成");
     }
     else
     {
-        SmbHeader(y, "\xe6\x93\x8d\xe4\xbd\x9c"); y += 13;
-        SmbAction(y, 5, m_iSelect, "\xe4\xbf\x9d\xe5\xad\x98\xe5\xb9\xb6\xe8\xbf\x9e\xe6\x8e\xa5"); y += 12;
-        SmbAction(y, 6, m_iSelect, "\xe6\x96\xad\xe5\xbc\x80\xe8\xbf\x9e\xe6\x8e\xa5");
-
-        y = 183;
-        FontColor4f(0.6f, 0.6f, 0.6f, 1.0f);
-        if (m_iDigitIP >= 0)
-        {
-            SmbCenter(128, y, "\xe5\xb7\xa6/\xe5\x8f\xb3:\xe4\xbd\x8d  \xe4\xb8\x8a/\xe4\xb8\x8b:\xe6\x94\xb9\xe5\x80\xbc"); y += 11;
-            SmbCenter(128, y, "X/Triangle: done");
-        }
-        else
-        {
-            SmbCenter(128, y, "X:\xe7\xbc\x96\xe8\xbe\x91/\xe9\x80\x89\xe6\x8b\xa9  \xe2\x96\xa1:\xe9\x87\x8d\xe7\xbd\xae"); y += 11;
-            SmbCenter(128, y, "\xe2\x97\x8b:\xe9\x87\x8d\xe6\x96\xb0\xe5\x8a\xa0\xe8\xbd\xbd\xe9\x85\x8d\xe7\xbd\xae");
-        }
+        SmbCenter(128, y, "X:编辑/选择  □:重置"); y += 11;
+        SmbCenter(128, y, "O:重新载入配置");
     }
 
     path = SmbGetConfigPath();

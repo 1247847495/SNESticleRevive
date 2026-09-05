@@ -43,6 +43,18 @@ Int32 FontGetHeight();
 Int32 FontGetWidth();
 Int32 FontGetStrWidth(const Char *pStr);
 
+/* Vertical advance for multi-line lists. CJK glyphs are 12px tall and are
+   drawn from vy-2 (see _FontDrawCjkGlyph), so the classic FontGetHeight()+2
+   (11px) made consecutive Chinese lines overlap by 1px. This returns 17px:
+   a clearly visible 5px gap between hanzi rows, 8px for ASCII rows. */
+Int32 FontGetRowAdvance();
+
+/* Byte length of the next character in pStr (UTF-8 aware; invalid
+   sequences are treated as GBK double bytes, same as the renderer).
+   Returns 0 at end of string.  Used by UI code that must step whole
+   characters (marquee scrolling, ellipsis truncation). */
+Int32 FontCharLen(const Char *pStr);
+
 void FontNew(FontT *pFont);
 void FontDelete(FontT *pFont);
 void FontParseChars(FontT *pFont, class CSurface *pSurface, const Char *pCharList);

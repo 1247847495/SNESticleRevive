@@ -5,6 +5,11 @@
 #define SNQUEUE_SIZE (512)
 #define SNPPU_QUEUE_SIZE (4096)
 
+/* AURORA_REVIVE_005CEE_PPU_RING_20260829
+ * Revive 005cee6d6731: mantém as filas SPC com 512 entradas, mas dá ao PPU
+ * uma fila circular dedicada de 4096. Jogos raster/HDMA pesados podem emitir
+ * milhares de writes por frame; evitar o "full" elimina SyncPPU forçado sem
+ * mudar ordem, ciclo ou conteúdo de nenhum write. */
 struct SNQueueElementT
 {
 	Uint32	uCycle;
@@ -41,21 +46,17 @@ public:
 				m_iTail = 0;
 			m_nCount++;
 
-			// enqueue write
 			pElement->uCycle = uCycle;
 			pElement->uAddr  = uAddr;
 			pElement->uData = uData;
 			return TRUE;
-		} else
-		{
-			// write cannot be enqueued, buffer full
-			return FALSE;
 		}
+
+		return FALSE;
 	}
 
-	inline SNQueueElementT	*Dequeue(Uint32 uCycle)
+	inline SNQueueElementT *Dequeue(Uint32 uCycle)
 	{
-		// dequeue element only if it is earlier than cycle time given
 		if (m_nCount > 0 && (uCycle > m_Elements[m_iHead].uCycle))
 		{
 			SNQueueElementT *pElement = &m_Elements[m_iHead];
@@ -67,7 +68,7 @@ public:
 		return NULL;
  	}
 
-	inline SNQueueElementT	*Dequeue()
+	inline SNQueueElementT *Dequeue()
 	{
 		if (m_nCount > 0)
 		{
@@ -81,16 +82,12 @@ public:
 	}
 
 private:
-    Int32			m_iHead;	// current read position within write queue
-    Int32			m_iTail;	// current write position within write queue
-	Int32           m_nCount;
+    Int32			m_iHead;
+    Int32			m_iTail;
+	Int32			m_nCount;
 	SNQueueElementT	m_Elements[t_nSize];
-
 };
 
-/* SPC queues retain the original footprint.  Raster-heavy games can issue
-   more than two thousand PPU writes in one frame, so the PPU gets a separate
-   ring large enough to avoid forced mid-frame flushes. */
 typedef SNQueueT<SNQUEUE_SIZE> SNQueue;
 typedef SNQueueT<SNPPU_QUEUE_SIZE> SNPPUQueue;
 

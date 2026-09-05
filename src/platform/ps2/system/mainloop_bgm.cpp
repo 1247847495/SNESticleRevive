@@ -10,8 +10,8 @@
  * e' o unico produtor de audio -- nao briga com o AudMixBuffer do jogo.
  *
  * Descoberta de arquivo: procura todas as faixas .mod/.xm em BGM_PATH
- * (define do Makefile) e em pastas padrao, indexa-as e toca como uma
- * playlist: ao terminar uma faixa avanca para a proxima. Ao voltar de uma ROM
+ * (define do Makefile) e em pastas padrao e indexa todas. Track index seleciona a faixa atual/inicial; ao fim natural, a playlist
+ * avanca automaticamente e volta a primeira depois da ultima. Ao voltar de uma ROM
  * o decoder carregado e' retomado sem reler o dispositivo.
  *
  * O player anterior (jar_mod/jar_xm) implementava apenas parte dos efeitos
@@ -59,7 +59,7 @@ extern "C" {
    (meio-termo, padrao), 48000 (nativo, mais pesado).  Sobrescrevivel pelo
    Makefile:  make BGM_RATE=24000 */
 #ifndef BGM_RATE
-#define BGM_RATE        24000
+#define BGM_RATE        16000
 #endif
 
 /* Teto de frames de SAIDA (48 kHz) por chamada.  Em regime normal so
@@ -136,6 +136,8 @@ static const char *s_dirs[] = {
     "mmce1:/bgm",
     "mass:/SNESticle/bgm",
     "mass:/bgm",
+    "ata0:/SNESticle/bgm",
+    "ata0:/bgm",
     "cdfs:/BGM",
 };
 #define BGM_NUM_DIRS (sizeof(s_dirs) / sizeof(s_dirs[0]))
@@ -151,15 +153,16 @@ enum BgmStateE {
 };
 
 static int  s_state    = BGM_UNTRIED;
-static int  s_volume   = 100;          /* 0 = off; 1..100 (Video Config)  */
-static int  s_rate     = BGM_RATE;     /* taxa de sintese (Hz), Video Config */
+static int  s_volume   = 200;          /* internal PCM gain 0..400; UI /2 */
+static Bool s_enabled  = FALSE;        /* Menu Music default Off; volume independent */
+static int  s_rate     = BGM_RATE;     /* taxa de sintese (Hz), Settings Menu */
 static Bool s_volSet   = FALSE;        /* ja' firmamos o volume p/ tocar? */
 static int  s_drainWait = 0;           /* frames esperando dreno da cauda */
 static int  s_gapFrames = 0;           /* frames de silencio na troca de faixa */
 
-/* Frequencias de sintese oferecidas no Video Config (Hz).  Mais alta =
-   melhor qualidade e mais CPU (48000 pode derrubar o fps).  24000 e' o
-   padrao seguro. A saida e' sempre reamostrada para 48 kHz. */
+/* Frequencias de sintese oferecidas no Settings Menu (Hz).  Mais alta =
+   melhor qualidade e mais CPU (48000 pode derrubar o fps).  16000 e' o
+   padrao de desempenho. A saida e' sempre reamostrada para 48 kHz. */
 static const int s_rateList[] = { 16000, 22050, 24000, 32000, 38000, 44100, 48000 };
 #define BGM_RATE_COUNT ((int)(sizeof(s_rateList) / sizeof(s_rateList[0])))
 
@@ -174,6 +177,7 @@ typedef struct { char path[256]; int kind; } BgmTrackT; /* kind 1=mod 2=xm */
 static BgmTrackT s_index[BGM_INDEX_MAX];
 static int       s_indexCount = -1;    /* -1 = ainda nao escaneado */
 static int       s_trackIdx   = 0;     /* faixa atual no indice    */
+static int       s_requestedTrackIdx = 0; /* AURORA_PD_MEGA_FIX_20260820: UI 1..64 */
 
 enum BgmDiscScanE {
     BGM_DISC_PENDING = 0,
@@ -182,14 +186,13 @@ enum BgmDiscScanE {
 static int          s_discScanState   = BGM_DISC_PENDING;
 static unsigned int s_discScanFrames  = 0;
 static int          s_discStablePolls = 0;
-static Bool         s_discEeReady     = FALSE;
 static char         s_bootBgm[256];
-static Bool         s_massWasReady    = FALSE;
-static Bool         s_massScanDone    = FALSE;
 static Bool         s_mmceWasEnabled  = FALSE;
 static Bool         s_mmceScanDone    = FALSE;
 static Bool         s_hddWasEnabled   = FALSE;
 static Bool         s_hddScanDone     = FALSE;
+static Bool         s_ataBdWasEnabled = FALSE;
+static Bool         s_ataBdScanDone   = FALSE;
 
 /* Synchronous filesystem calls run on the UI thread, but the already-loaded
    tracker can be mixed safely by a small EE helper thread while that thread
@@ -202,6 +205,10 @@ static int          s_ioLock       = -1;
 static int          s_ioThread     = -1;
 static volatile int s_ioDepth      = 0;
 static Bool         s_menuActive   = FALSE;
+/* AURORA_BGM_SELECTED_TRACK_LOOP_V4
+ * Cold boot has no game-audio tail. Once BgmStop() is called for gameplay,
+ * later menu entries keep the normal protective drain. */
+static Bool         s_gameHasRun   = FALSE;
 static unsigned char s_ioStack[BGM_IO_THREAD_STACK_BYTES]
     __attribute__((aligned(64)));
 
@@ -266,11 +273,6 @@ static Bool _IsDiscPath(const char *p)
             strncmp(p, "cdrom", 5) == 0) ? TRUE : FALSE;
 }
 
-static Bool _IsMassPath(const char *p)
-{
-    return (p && strncmp(p, "mass", 4) == 0) ? TRUE : FALSE;
-}
-
 /* Retorna o slot fisico de um caminho MMCE, ou -1 para outro device.
    Separar esses caminhos impede opendir("mmceN:") antes de mmceman estar
    residente e antes de o cartao real ter respondido ao PING. */
@@ -287,6 +289,14 @@ static int _MmcePathSlot(const char *p)
 static Bool _IsHddPath(const char *p)
 {
     return (p && strncmp(p, "hdd0:", 5) == 0) ? TRUE : FALSE;
+}
+
+/* O HDD interno em modo exFAT/FAT aparece como device BDM ata0:. Como o
+   atad_bd e' carregado sob demanda (e conflita com o APA), esses caminhos
+   so podem ser abertos depois de AtaBdLoadEmbeddedIrx(). */
+static Bool _IsAtaBdPath(const char *p)
+{
+    return (p && strncmp(p, "ata0:", 5) == 0) ? TRUE : FALSE;
 }
 
 /* Tipos que o cdfs.irx do PS2SDK reconhece como discos com filesystem. */
@@ -487,49 +497,16 @@ static int _ScanDir(const char *scanDir, int depth)
 
 static void _WakeAfterNewSource(int before)
 {
+    if (s_indexCount != before)
+        printf("[BGM] indexed tracks: %d\n", s_indexCount);
+
     if (before == 0 && s_indexCount > 0)
     {
-        unsigned int seed = (unsigned int)clock();
-        s_trackIdx = (int)(seed % (unsigned int)s_indexCount);
+        if (s_requestedTrackIdx >= s_indexCount) s_requestedTrackIdx = s_indexCount - 1;
+        s_trackIdx = s_requestedTrackIdx;
         if (s_state == BGM_FAILED)
             s_state = BGM_UNTRIED;
     }
-}
-
-/* USB is deliberately absent from the boot-critical path.  Once the browser
-   has started the USB BDM stack (or MX4SIO registered a massN: device), scan
-   the mass BGM directories exactly once and wake a previously empty player. */
-static void _MassScanStep(void)
-{
-    int ready = UsbBdmIsLoaded() || Mx4sioIsLoaded();
-    int enabled = MassStorageIsEnabled() || Mx4sioIsEnabled();
-    int before;
-    size_t d;
-
-    if (!enabled || !ready)
-    {
-        s_massWasReady = FALSE;
-        s_massScanDone = FALSE;
-        return;
-    }
-
-    if (!s_massWasReady)
-    {
-        s_massWasReady = TRUE;
-        s_massScanDone = FALSE;
-    }
-    if (s_massScanDone) return;
-
-    before = s_indexCount;
-    if (_IsMassPath(s_bootBgm))
-        _ScanDir(s_bootBgm, 0);
-
-    for (d = 0; d < BGM_NUM_DIRS && s_indexCount < BGM_INDEX_MAX; d++)
-        if (_IsMassPath(s_dirs[d]))
-            _ScanDir(s_dirs[d], 0);
-
-    s_massScanDone = TRUE;
-    _WakeAfterNewSource(before);
 }
 
 /* MMCE e' carregado sob demanda e, ao contrario de mc:/mass:/, pode ser
@@ -582,6 +559,47 @@ static void _MmceScanStep(void)
     }
 
     s_mmceScanDone = TRUE;
+    _WakeAfterNewSource(before);
+}
+
+/* O HDD interno em modo exFAT/FAT (ata0:) tambem e' carregado sob demanda,
+   como o MMCE. Faz uma unica sondagem por ativacao: carrega atad_bd,
+   escaneia as pastas ata0: e reanima o player se estava em "No Track". */
+static void _AtaBdScanStep(void)
+{
+    int enabled = AtaBdSupportIsEnabled();
+    int before;
+    size_t d;
+
+    if (!enabled)
+    {
+        /* Permite uma nova sondagem se o usuario ligar exFAT mais tarde. */
+        s_ataBdWasEnabled = FALSE;
+        s_ataBdScanDone = FALSE;
+        return;
+    }
+
+    if (!s_ataBdWasEnabled)
+    {
+        s_ataBdWasEnabled = TRUE;
+        s_ataBdScanDone = FALSE;
+    }
+    if (s_ataBdScanDone) return;
+
+    before = s_indexCount;
+
+    /* Carrega dev9+atad_bd; falha (ou APA carregado nesta sessao) encerra. */
+    if (s_indexCount < BGM_INDEX_MAX && AtaBdLoadEmbeddedIrx() >= 0)
+    {
+        if (_IsAtaBdPath(s_bootBgm))
+            _ScanDir(s_bootBgm, 0);
+
+        for (d = 0; d < BGM_NUM_DIRS && s_indexCount < BGM_INDEX_MAX; d++)
+            if (_IsAtaBdPath(s_dirs[d]))
+                _ScanDir(s_dirs[d], 0);
+    }
+
+    s_ataBdScanDone = TRUE;
     _WakeAfterNewSource(before);
 }
 
@@ -703,40 +721,38 @@ static void _BuildIndex(void)
     s_discScanState = BGM_DISC_PENDING;
     s_discScanFrames = 0;
     s_discStablePolls = 0;
-    s_discEeReady = FALSE;
-    s_massWasReady = FALSE;
-    s_massScanDone = FALSE;
     s_mmceWasEnabled = FALSE;
     s_mmceScanDone = FALSE;
     s_hddWasEnabled = FALSE;
     s_hddScanDone = FALSE;
+    s_ataBdWasEnabled = FALSE;
+    s_ataBdScanDone = FALSE;
     _BuildBootBgm();
 
-    /* Primeiro escaneia caminhos que nao dependem de CD/DVD, MMCE ou HDD.
-       Os dispositivos especiais possuem etapas proprias abaixo. */
+    /* Primeiro escaneia caminhos que nao dependem de CD/DVD, MMCE, HDD APA
+       ou HDD exFAT. Os dispositivos especiais possuem etapas proprias abaixo. */
     if (s_bootBgm[0] && !_IsDiscPath(s_bootBgm) &&
-        !_IsMassPath(s_bootBgm) && _MmcePathSlot(s_bootBgm) < 0 &&
-        !_IsHddPath(s_bootBgm))
+        _MmcePathSlot(s_bootBgm) < 0 && !_IsHddPath(s_bootBgm) &&
+        !_IsAtaBdPath(s_bootBgm))
         _ScanDir(s_bootBgm, 0);
 
     for (d = 0; d < BGM_NUM_DIRS && s_indexCount < BGM_INDEX_MAX; d++)
-        if (!_IsDiscPath(s_dirs[d]) && !_IsMassPath(s_dirs[d]) &&
-            _MmcePathSlot(s_dirs[d]) < 0 && !_IsHddPath(s_dirs[d]))
+        if (!_IsDiscPath(s_dirs[d]) && _MmcePathSlot(s_dirs[d]) < 0 &&
+            !_IsHddPath(s_dirs[d]) && !_IsAtaBdPath(s_dirs[d]))
             _ScanDir(s_dirs[d], 0);
 
     /* Config persistida ja pode ter habilitado MMCE no boot. Esta chamada
        tambem fica barata quando o recurso esta desligado. */
-    _MassScanStep();
     _MmceScanStep();
     _HddScanStep();
+    _AtaBdScanStep();
 
-    /* faixa inicial pseudo-aleatoria (clock varia conforme o tempo de
-       boot); se nao houver entropia, cai no indice 0 -- sem problema. */
+    /* AURORA_PD_MEGA_FIX_20260820: honour the persistent 1..64 menu selection. */
     if (s_indexCount > 0)
-    {
-        unsigned int seed = (unsigned int)clock();
-        s_trackIdx = (int)(seed % (unsigned int)s_indexCount);
-    }
+        if (s_requestedTrackIdx >= s_indexCount) s_requestedTrackIdx = s_indexCount - 1;
+        s_trackIdx = s_requestedTrackIdx;
+
+    printf("[BGM] initial indexed tracks: %d\n", s_indexCount);
 }
 
 /* Um passo curto por frame. Nenhum acesso a cdfs: acontece antes de o
@@ -751,21 +767,6 @@ static void _DiscScanStep(void)
     DIR *root;
 
     if (s_discScanState == BGM_DISC_DONE) return;
-
-    /* Do not start CDFS merely because menu music is enabled.  The browser's
-       explicit cdfs: selection owns that potentially blocking module load.
-       This is what keeps direct OPL App/USB boots independent of the drive. */
-    if (!CdfsIsLoaded()) return;
-
-    if (!s_discEeReady)
-    {
-        if (!sceCdInit(SCECdINoD))
-        {
-            s_discScanState = BGM_DISC_DONE;
-            return;
-        }
-        s_discEeReady = TRUE;
-    }
 
     s_discScanFrames++;
     if (s_discScanFrames < BGM_DISC_GRACE_FRAMES) return;
@@ -835,6 +836,12 @@ static char *_LoadFileAlloc(const char *path, long *outLen)
             HddMapPath(path, mapped, sizeof(mapped)) != 1)
             return NULL;
         openPath = mapped;
+    }
+    else if (_IsAtaBdPath(path))
+    {
+        /* exFAT/FAT: caminho direto no BDM, mas o atad_bd precisa residir. */
+        if (!AtaBdSupportIsEnabled() || AtaBdLoadEmbeddedIrx() < 0)
+            return NULL;
     }
 
     f = fopen(openPath, "rb");
@@ -965,22 +972,28 @@ static void _BgmFree(void)
     s_gapFrames = 0;
 }
 
-/* Avanca para a proxima faixa do indice (sequencial, circular) e libera o
-   decoder atual SEM re-armar o dreno -- usado pelo auto-advance quando a
-   faixa atual termina uma passada inteira.  Retorna TRUE se trocou; com
-   0/1 faixa nao ha "outra": retorna FALSE (o chamador deixa a faixa unica
-   seguir em loop normal, sem reload nem hitch). */
-static Bool _BgmAdvance(void)
+/* AURORA_BGM_PLAYLIST_REVIEW_V1_20260821
+ * Natural end-of-song advances through the discovered playlist. Track index
+ * therefore means "current/starting track", not "repeat this one forever". */
+static void _BgmAdvanceNaturalLocked(void)
 {
-    if (s_indexCount <= 1) return FALSE;
+    if (s_indexCount <= 0)
+    {
+        _BgmFreeDecoder();
+        s_state = BGM_FAILED;
+        return;
+    }
+
     s_trackIdx = (s_trackIdx + 1) % s_indexCount;
-    _BgmFreeDecoder();   /* mantem s_volSet: proxima faixa toca na hora */
-    return TRUE;
+    s_requestedTrackIdx = s_trackIdx;
+    _BgmFreeDecoder();
+    s_gapFrames = BGM_GAP_FRAMES;
 }
 
 void BgmStop(void)
 {
     _BgmLock();
+    s_gameHasRun = TRUE;
     /* Para de alimentar SEM liberar o decoder: a faixa fica carregada,
        entao reabrir o menu e' instantaneo (sem reler do disco -> sem a
        travadinha).  So' re-arma a logica de volume/dreno para a proxima
@@ -993,12 +1006,30 @@ void BgmStop(void)
     _BgmUnlock();
 }
 
+/* AURORA_V4_16_SAFE_GAME_SWITCH_FLUSH_20260830 */
+void BgmReleaseDecoderForGameSwitch(void)
+{
+    _BgmLock();
+    s_menuActive = FALSE;
+    /* Free decoder/resampler heap; preserve settings, index and rate. */
+    _BgmFree();
+    _BgmUnlock();
+}
+
 void BgmMenuEnter(void)
 {
     /* This is intentionally lighter than BgmUpdate(): entering the menu must
        never scan a drive or reload a module before the first frame appears. */
     _BgmLock();
     s_menuActive = TRUE;
+    /* AURORA_AUDIO_UI_SOFT_TRANSITION_V1_20260901
+     * UI entry now leaves audsrv running and muted so the gameplay tail can
+     * drain naturally. Never unmute here: _BgmUpdateLocked() already owns the
+     * drain threshold/timeout and raises volume only when it is safe to feed
+     * menu PCM. Aud_Play() remains as a fail-soft wake if another path had
+     * stopped audsrv before menu entry. */
+    if (s_enabled && s_volume > 0 && Aud_IsInitialized())
+        Aud_Play();
     _BgmUnlock();
 }
 
@@ -1019,16 +1050,44 @@ void BgmNext(void)
     }
 
     s_trackIdx = (s_trackIdx + 1) % s_indexCount;
+    s_requestedTrackIdx = s_trackIdx;
 
     if (s_state == BGM_MOD || s_state == BGM_XM) _BgmFree();
     _BgmUnlock();
+}
+
+void BgmSetTrackIndex(int track)
+{
+    int next;
+    _BgmLock();
+    if (track < 1) track = 1;
+    if (track > BGM_INDEX_MAX) track = BGM_INDEX_MAX;
+    s_requestedTrackIdx = track - 1;
+    if (s_indexCount > 0 && s_requestedTrackIdx >= s_indexCount)
+        s_requestedTrackIdx = s_indexCount - 1;
+    next = s_requestedTrackIdx;
+    if (next != s_trackIdx)
+    {
+        s_trackIdx = next;
+        if (s_state == BGM_MOD || s_state == BGM_XM) _BgmFree();
+    }
+    _BgmUnlock();
+}
+
+int BgmGetTrackIndex(void)
+{
+    int result;
+    _BgmLock();
+    result = s_requestedTrackIdx + 1;
+    _BgmUnlock();
+    return result;
 }
 
 void BgmSetVolume(int vol)
 {
     _BgmLock();
     if (vol < 0)   vol = 0;
-    if (vol > 100) vol = 100;
+    if (vol > 400) vol = 400;
 
     if (vol == 0)
     {
@@ -1039,8 +1098,8 @@ void BgmSetVolume(int vol)
     }
     else if (s_volSet && Aud_IsInitialized())
     {
-        /* ja' tocando: ajusta o volume ao vivo */
-        Aud_Setvol((unsigned int)(vol * 0x3FFF / 100));
+        /* PCM carries Menu Volume; audsrv only supplies full-scale/mute. */
+        Aud_Setvol(s_enabled ? 0x3FFFu : 0u);
     }
 
     s_volume = vol;
@@ -1056,11 +1115,59 @@ int BgmGetVolume(void)
     return result;
 }
 
+void BgmSetEnabled(int enabled)
+{
+    Bool next;
+
+    _BgmLock();
+    next = enabled ? TRUE : FALSE;
+
+    if (next == s_enabled)
+    {
+        _BgmUnlock();
+        return;
+    }
+
+    s_enabled = next;
+
+    /* AURORA_BGM_TRUE_OFF_V1
+     * OFF destroys the decoder/module and the queued PCM. The track index is
+     * intentionally preserved, so the next ON reloads that same track from
+     * position zero instead of resuming an old xmp position. */
+    _BgmFree();
+
+    if (!s_enabled || s_volume <= 0)
+    {
+        if (Aud_IsInitialized())
+        {
+            Aud_Setvol(0);
+            Aud_Clearbuff();
+        }
+    }
+    else if (Aud_IsInitialized())
+    {
+        /* ON starts from a completely empty audio service. BgmUpdate will
+           reload s_trackIdx from the beginning and feed fresh PCM. */
+        Aud_Setvol(0);
+        Aud_Clearbuff();
+        Aud_Setvol(0x3FFFu);
+        Aud_Play();
+    }
+
+    _BgmUnlock();
+}
+
+int BgmIsEnabled(void)
+{
+    return s_enabled ? 1 : 0;
+}
+
+
 int BgmTrackCount(void)
 {
     int result;
     /* Draw/getter paths stay memory-only. The next normal BgmUpdate performs
-       lazy discovery; merely drawing Video Config must not open devices. */
+       lazy discovery; merely drawing Settings Menu must not open devices. */
     _BgmLock();
     result = s_indexCount < 0 ? 0 : s_indexCount;
     _BgmUnlock();
@@ -1071,8 +1178,7 @@ int BgmIsSearching(void)
 {
     int result;
     _BgmLock();
-    result = (s_indexCount < 0 ||
-              (CdfsIsLoaded() && s_discScanState == BGM_DISC_PENDING)) ? 1 : 0;
+    result = (s_indexCount < 0 || s_discScanState == BGM_DISC_PENDING) ? 1 : 0;
     _BgmUnlock();
     return result;
 }
@@ -1140,7 +1246,7 @@ static void _BgmUpdateLocked(Bool allowFilesystem)
 {
     int avail, n, j;
 
-    if (s_volume <= 0)         return;   /* OFF: nem toca o drive */
+    if (!s_enabled || s_volume <= 0) return;   /* disabled/zero: nem toca o drive */
     if (s_indexCount < 0)
     {
         if (!allowFilesystem) return;
@@ -1148,9 +1254,9 @@ static void _BgmUpdateLocked(Bool allowFilesystem)
     }
     if (allowFilesystem)
     {
-        _MassScanStep();
         _MmceScanStep();
         _HddScanStep();
+        _AtaBdScanStep();
         _DiscScanStep();
     }
     if (!Aud_IsInitialized())  return;
@@ -1193,13 +1299,16 @@ static void _BgmUpdateLocked(Bool allowFilesystem)
            nunca drena -- sem o timeout a musica so' comecava depois de
            entrar num jogo e voltar.  O timeout cobre a cauda real (~107ms)
            e destrava o caso do boot. */
-        if (Aud_Buffered() > BGM_DRAIN_THRESH && s_drainWait < BGM_DRAIN_MAXFRAMES)
+        if (s_gameHasRun &&
+            Aud_Buffered() > BGM_DRAIN_THRESH &&
+            s_drainWait < BGM_DRAIN_MAXFRAMES)
         {
             s_drainWait++;
             return;
         }
         s_drainWait = 0;
-        Aud_Setvol((unsigned int)(s_volume * 0x3FFF / 100)); /* volume do menu */
+        /* Menu Volume is PCM gain; audsrv stays at its legal full scale. */
+        Aud_Setvol(0x3FFFu);
         s_volSet = TRUE;
     }
 
@@ -1228,38 +1337,42 @@ static void _BgmUpdateLocked(Bool allowFilesystem)
         append = needed - s_sourceFrames;
         if (append > 0)
         {
-            struct xmp_frame_info fi;
-            int loopLimit = (s_indexCount > 1) ? 1 : 0;
             int ret;
 
-            memset(&fi, 0, sizeof(fi));
+            /* AURORA_BGM_PLAYLIST_REVIEW_V1_20260821
+             * Track index selects the current/starting song. Ask libxmp to
+             * report the first natural loop boundary so Aurora can advance to
+             * the next indexed song instead of repeating one module forever. */
+            /* Stop at the first natural module loop/end so Aurora can
+             * advance the playlist. libxmp only checks loop_count when this
+             * argument is > 0. */
             ret = xmp_play_buffer(
                 s_xmp,
                 &s_inter[s_sourceFrames * 2],
                 append * 2 * (int)sizeof(short),
-                loopLimit);
-            xmp_get_frame_info(s_xmp, &fi);
+                1);
 
-            /* Com playlist, libxmp interrompe no primeiro loop completo.
-               Assim nao vazam amostras do recomeco da faixa nem um pattern
-               preso. Com uma faixa apenas, ela continua em loop infinito. */
-            if (s_indexCount > 1 && fi.loop_count > 0)
+            if (ret == -XMP_END)
             {
-                if (_BgmAdvance())
+                /* loop=1 reports the first natural module loop/end. With multiple
+                 * indexed songs, continue as a playlist; with one song, loop
+                 * that song so menu music never simply dies. */
+                if (s_indexCount > 1)
+                    _BgmAdvanceNaturalLocked();
+                else
                 {
-                    s_gapFrames = BGM_GAP_FRAMES;
-                    return;
+                    xmp_restart_module(s_xmp);
+                    _ResetResampler();
                 }
+                return;
             }
             if (ret < 0)
             {
-                if (_BgmAdvance())
-                    s_gapFrames = BGM_GAP_FRAMES;
-                else
-                {
-                    _BgmFreeDecoder();
-                    s_state = BGM_FAILED;
-                }
+                /* A real decoder/state error should not make us wander to a
+                 * different track and hide the failure. Stop BGM cleanly
+                 * instead of reopening the same file on every video frame. */
+                _BgmFreeDecoder();
+                s_state = BGM_FAILED;
                 return;
             }
 
@@ -1303,10 +1416,29 @@ static void _BgmUpdateLocked(Bool allowFilesystem)
         s_sourceFrames = remain;
     }
 
-    /* garante volume audivel: o menu de pausa muta o audsrv (Aud_Setvol(0))
-       para matar o rabo de audio do jogo; o volume cheio ja' foi firmado
-       acima, apos a cauda do jogo drenar. */
+    /* Menu Volume uses the same internal convention as Game Volume:
+       0..400 internal -> 0..200 UI, with 200 internal = unity / UI 100.
+       audsrv itself cannot exceed full scale, so amplification/attenuation
+       is performed on the 16-bit PCM here and saturated before enqueue. */
+    if (s_volume != 200)
+    {
+        for (j = 0; j < n; j++)
+        {
+            int l = ((int)s_left[j]  * s_volume) / 200;
+            int r = ((int)s_right[j] * s_volume) / 200;
 
+            if (l > 32767)  l = 32767;
+            if (l < -32768) l = -32768;
+            if (r > 32767)  r = 32767;
+            if (r < -32768) r = -32768;
+
+            s_left[j]  = (short)l;
+            s_right[j] = (short)r;
+        }
+    }
+
+    /* O menu de pausa muta audsrv para matar a cauda do jogo. Para BGM
+       nao-zero ele fica em full scale; Menu Volume ja foi aplicado ao PCM. */
     Aud_Enqueue(s_left, s_right, n, 0); /* wait=0: best-effort, nao trava */
 }
 
@@ -1419,3 +1551,5 @@ void BgmIOEnd(void)
         s_ioDepth--;
     _BgmUnlock();
 }
+
+/* AURORA_V4_16_SAFE_GAME_SWITCH_FLUSH_20260830 */

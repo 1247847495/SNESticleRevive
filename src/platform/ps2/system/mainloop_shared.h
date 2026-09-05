@@ -17,8 +17,18 @@
 #include "snstate.h"
 #include "snrom.h"
 #include "nessystem.h"
+/* AURORA_FCEUMM_FDS_V0_5_SHARED */
+#include "nes/fceumm/fdssystem.h"
 #include "nesrom.h"
 #include "nesstate.h"
+#include "segasystem.h"
+#include "segarom.h"
+/* AURORA_PCE_EXPERIMENTAL_V1 */
+#include "pcesystem.h"
+#include "pcerom.h"
+/* AURORA_SNES9X2010_V1 */
+#include "snes9x2010system.h"
+#include "snes9x2010rom.h"
 #include "emusys.h"
 #include "emumovie.h"
 #include "rendersurface.h"
@@ -74,7 +84,7 @@
 #endif
 
 #ifndef MAINLOOP_MAXSRAMSIZE
-#define MAINLOOP_MAXSRAMSIZE (64 * 1024)
+#define MAINLOOP_MAXSRAMSIZE (512 * 1024)
 #endif
 
 
@@ -101,6 +111,7 @@ extern SnesStateT      _SnesState;
    gated until Phase 5 -- we only need the variables themselves to
    exist so the linker is happy. */
 extern NesSystem      *_pNes;
+extern FdsSystem      *_pFds; /* AURORA_FCEUMM_FDS_V0_5_SHARED */
 extern NesRom         *_pNesRom;
 extern NesFDSBios     *_pNesFDSBios;
 extern NesDisk        *_pNesFDSDisk;
@@ -108,9 +119,20 @@ extern NesStateT       _NesState;
 extern Int32           _MainLoop_iDisk;
 extern Bool            _MainLoop_bDiskInserted;
 
+/* AURORA_PICODRIVE_STAGE2 */
+extern SegaSystem     *_pSega;
+extern SegaRom        *_pSegaRom;
+extern PceSystem      *_pPce;
+extern PceRom         *_pPceRom;
+/* AURORA_SNES9X2010_V1 */
+extern Snes9x2010System *_pSnes9x2010;
+extern Snes9x2010Rom    *_pSnes9x2010Rom;
+
 /* ---- ROM / framebuffer / audio buffers ---------------------------- */
 
-extern Uint8           _RomData[8 * 1024 * 1024 + 1024];
+/* AURORA_DYNAMIC_ROM_BUFFER_V1_20260823 */
+extern Uint8          *_RomData;
+extern Uint32          _RomDataCapacity;
 extern CRenderSurface *_fbTexture[2];
 extern TextureT        _OutTex;
 extern AudMixBuffer *_AudMix;
@@ -126,6 +148,7 @@ extern AudMixBuffer *_AudMix;
    any consumer falls back to the legacy hardcoded layout. */
 extern Uint32 _MainLoop_uOutTexTBP;
 extern Uint32 _MainLoop_uBlenderTBP;
+extern Uint32 g_FakeSRAMSize;
 #ifdef DEBUG
 extern CWavFile _WavFile;
 #endif
@@ -138,6 +161,7 @@ extern CNetworkScreen *_MainLoop_pNetworkScreen;
 extern CMenuScreen    *_MainLoop_pMenuScreen;
 extern CMenuScreen    *_MainLoop_pStateScreen;
 extern CMenuScreen    *_MainLoop_pStateDeviceScreen;
+extern CMenuScreen    *_MainLoop_pStateConfirmScreen;
 extern CMenuScreen    *_MainLoop_pMemCardFormatScreen;
 extern CLogScreen     *_MainLoop_pLogScreen;
 extern CVideoScreen   *_MainLoop_pVideoScreen;
@@ -165,6 +189,9 @@ extern Float32 _MainLoop_fOutputIntensity;
 /* ---- Function entrypoints across mainloop_*.cpp ------------------- */
 
 void MainLoopRender();
+/* System-load-only 240p physical raster switch. */
+Bool MainLoopEnsureGameplayRasterWidth(Int32 width);
+Bool MainLoopReinitVideoMode(Int32 mode);
 void _MenuEnable(Bool bEnable);
 void _MenuRuntimeUpdate(void);
 /* Drawn from MainLoopRender() (mainloop_render.cpp), defined in
@@ -172,6 +199,19 @@ void _MenuRuntimeUpdate(void);
    mainloop.cpp; promoted to extern when MainLoopRender() and the
    menu-runtime were split into separate translation units. */
 void _MenuDraw();
+
+/* AURORA_SNES9X2010_V1 -- runtime-only in V1; persistence is V2. */
+enum MainLoopSnesCoreE
+{
+    MAINLOOP_SNESCORE_SNESTICLE = 0,
+    MAINLOOP_SNESCORE_SNES9X2010,
+    MAINLOOP_SNESCORE_NUM
+};
+
+MainLoopSnesCoreE MainLoopSnesCoreGet();
+void MainLoopSnesCoreSet(MainLoopSnesCoreE eCore);
+void MainLoopSnesCoreCycleDir(Int32 dir);
+const Char *MainLoopSnesCoreGetName();
 
 
 enum
@@ -183,6 +223,14 @@ enum
 	MAINLOOP_ENTRYTYPE_NESFDSBIOS  ,
 	MAINLOOP_ENTRYTYPE_SNESROM     ,
 	MAINLOOP_ENTRYTYPE_SNESPALETTE ,
+	MAINLOOP_ENTRYTYPE_SEGAROM      ,
+	MAINLOOP_ENTRYTYPE_PCEROM       ,
 
+	MAINLOOP_ENTRYTYPE_CDIMAGE      , /* AURORA_SNES9X2010_V6_CD_SRAM_NOTICES_20260824: .cue, routed by content signature */
+	/* AURORA_FCEUMM_FDS_V4_TURBO_PAL_PERF_20260827; AURORA_FCEUMM_FDS_V5_CI_SMB_UPSTREAM_PERF_20260827: append-only so old entry numeric values stay stable. */
+	MAINLOOP_ENTRYTYPE_NESPALETTE  ,
+	MAINLOOP_ENTRYTYPE_SNESWCDISK   , /* AURORA_SWC_FLOPPY_V1_20260831: raw floppy .img */
+	MAINLOOP_ENTRYTYPE_SNESWCBIOS   , /* AURORA_SWC_FLOPPY_V5_20260831: swc.rom */
 	MAINLOOP_ENTRYTYPE_NUM
 };
+

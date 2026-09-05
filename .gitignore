@@ -1,15 +1,35 @@
+# Build output
 build/
 refs/
 logs/
+
+# Compiled/generated files
 *.o
 *.elf
 *.log
 *.tar.gz
-build/
-*.o
-*.elf
-*.log
 *.bak*
+
+# Local Python scripts
+*.py
+
+# Local helper scripts
+backup.sh
+copy.sh
 
 # Local PS2DEV environment
 .ps2dev-env
+
+# Editor/temp files
+.#*
+*~
+
+src/platform/ps2/iop/aurora_ps2mouse/*.elf
+src/platform/ps2/iop/aurora_ps2mouse/*.irx
+src/platform/ps2/iop/aurora_ps2mouse/obj/
+
+# Required PCE build tool
+!tools/namespace_pce_archive.py
+!tools/namespace_fceumm_fds_archive.py
+!tools/prepare_fceumm_fds_sources.py
+

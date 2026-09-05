@@ -61,6 +61,98 @@ Uint8 _tmw = 0x3F;
 Uint8 _ts = 0x3F;
 Uint8 _tsw = 0x3F;
 
+/* AURORA_V85_SOFTWARE_HACKS_STATE
+ * 0x1f = BG1..BG4+OBJ enabled. flags==0 = unchanged V8.3 output. */
+Uint8 g_SnesSoftwareLayerMask = (Uint8)(
+    SNESPPU_MASK_BG1 | SNESPPU_MASK_BG2 | SNESPPU_MASK_BG3 |
+    SNESPPU_MASK_BG4 | SNESPPU_MASK_OBJ);
+Uint8 g_SnesSoftwareHackFlags = 0;
+Uint8 g_SnesObjLimitLevel = SNPPU_OBJ_LIMIT_OFF;
+Uint8 g_SnesObjLimitMode = SNPPU_OBJ_LIMIT_MODE_SCANLINE;
+Int32 g_SnesObjLimitTileBudget = SNPPU_MAXOBJCHR;
+Int32 g_SnesObjLimitScreenBudget = SNESPPU_OBJ_NUM;
+Uint32 g_SnesObjLimitFramePhase = 0;
+static Bool g_SnesObjLimitVisibilityDirty = TRUE;
+
+static void _SNPPURenderRefreshObjLimitCache()
+{
+	Int32 nBudget;
+	switch (g_SnesObjLimitLevel)
+	{
+		case SNPPU_OBJ_LIMIT_LIGHT: nBudget=28; break;
+		case SNPPU_OBJ_LIMIT_MEDIUM: nBudget=24; break;
+		case SNPPU_OBJ_LIMIT_STRONG: nBudget=20; break;
+		case SNPPU_OBJ_LIMIT_EXTREME: nBudget=16; break;
+		case SNPPU_OBJ_LIMIT_HEAVY: nBudget=12; break;
+		case SNPPU_OBJ_LIMIT_INSANE: nBudget=8; break;
+		default: nBudget=SNPPU_MAXOBJCHR; break;
+	}
+	g_SnesObjLimitTileBudget =
+		(g_SnesObjLimitMode==SNPPU_OBJ_LIMIT_MODE_SCANLINE &&
+		 g_SnesObjLimitLevel!=SNPPU_OBJ_LIMIT_OFF) ? nBudget : SNPPU_MAXOBJCHR;
+	g_SnesObjLimitScreenBudget =
+		(g_SnesObjLimitMode==SNPPU_OBJ_LIMIT_MODE_SCREEN &&
+		 g_SnesObjLimitLevel!=SNPPU_OBJ_LIMIT_OFF) ? nBudget : SNESPPU_OBJ_NUM;
+}
+
+/* AURORA_SONIC_BLAST_MAN_COLOR_V7
+ * Set by the ROM loader only for exact Sonic Blast Man CRCs. */
+extern Bool g_SnesCompatSonicBlastManColorMath;
+static Uint8 g_SoftwareFramePhase = 0;
+
+void SNPPURenderSetSoftwareLayerMask(Uint8 uMask)
+{
+    g_SnesSoftwareLayerMask = (Uint8)(uMask &
+        (SNESPPU_MASK_BG1 | SNESPPU_MASK_BG2 | SNESPPU_MASK_BG3 |
+         SNESPPU_MASK_BG4 | SNESPPU_MASK_OBJ));
+}
+
+void SNPPURenderSetSoftwareHackFlags(Uint8 uFlags)
+{
+    Uint8 uNew = (Uint8)(uFlags & SNPPU_HACK_ALL);
+    if ((uNew ^ g_SnesSoftwareHackFlags) & SNPPU_HACK_FRAME_SKIP)
+        g_SoftwareFramePhase = 0;
+    g_SnesSoftwareHackFlags = uNew;
+}
+
+Bool SNPPURenderShouldRenderFrame(void)
+{
+    if (!(g_SnesSoftwareHackFlags & SNPPU_HACK_FRAME_SKIP))
+    {
+        g_SoftwareFramePhase = 0;
+        return TRUE;
+    }
+
+    Bool bRender = (g_SoftwareFramePhase == 0);
+    g_SoftwareFramePhase ^= 1;
+    return bRender;
+}
+
+
+/* AURORA_OBJ_LIMIT_HOTPATH_V3 */
+void SNPPURenderSetObjLimitLevel(Uint8 uLevel)
+{
+    if (uLevel >= SNPPU_OBJ_LIMIT_NUM) uLevel=SNPPU_OBJ_LIMIT_OFF;
+    if (g_SnesObjLimitLevel != uLevel)
+    {
+        g_SnesObjLimitLevel=uLevel;
+        g_SnesObjLimitFramePhase=0;
+        _SNPPURenderRefreshObjLimitCache();
+        g_SnesObjLimitVisibilityDirty=TRUE;
+    }
+}
+void SNPPURenderSetObjLimitMode(Uint8 uMode)
+{
+    if (uMode >= SNPPU_OBJ_LIMIT_MODE_NUM) uMode=SNPPU_OBJ_LIMIT_MODE_SCANLINE;
+    if (g_SnesObjLimitMode != uMode)
+    {
+        g_SnesObjLimitMode=uMode;
+        g_SnesObjLimitFramePhase=0;
+        _SNPPURenderRefreshObjLimitCache();
+        g_SnesObjLimitVisibilityDirty=TRUE;
+    }
+}
+
 
 #if CODE_PLATFORM == CODE_PS2
 #define PS2_RENDERINFOADDR  (PS2MEM_SCRATCHPAD +  0*1024)
@@ -116,17 +208,6 @@ static void _BuildPlaneLookup()
 		_SnesPPU_HFlipLookup[0][i] = i;
 		_SnesPPU_HFlipLookup[1][i] = _HFlipBits(i);
 	}
-
-	#if CODE_PLATFORM == CODE_PS2
-	/* Estes lookups somam exatamente 4,5 KiB e permanecem acima do buffer
-	   temporario do mixer SPC. O caminho BG passa a le-los no scratchpad,
-	   deixando o pequeno D-cache da EE disponivel para VRAM e estado PPU. */
-	memcpy((void *)PS2MEM_SNES_LOOKUP_ADDR,
-		_SnesPPU_PlaneLookup, sizeof(_SnesPPU_PlaneLookup));
-	memcpy((void *)(PS2MEM_SNES_LOOKUP_ADDR +
-			sizeof(_SnesPPU_PlaneLookup)),
-		_SnesPPU_HFlipLookup, sizeof(_SnesPPU_HFlipLookup));
-	#endif
 }
 
 void _DrawMask(Uint32 *pDest, SNMaskT *pMask, Int32 nPixels)
@@ -187,9 +268,12 @@ void SnesPPURender::RenderLine16(Int32 iLine)
 
 void SnesPPURender::UpdateCGRAM(Uint32 uAddr, Uint16 uData)
 {
-	/* A video-skipped frame still updates emulated CGRAM in SnesPPU.  The
-	   following rendered frame begins with UPDATE_ALL and uploads the complete
-	   palette, so touching GS/CLUT state here would be pure duplicate work. */
+	/* AURORA_SNES_SAFE_FRAMESKIP_HOST_ELIDE_V1_20260828
+	 * Safe Frameskip still updates emulated CGRAM in SnesPPU::WriteCGDATA().
+	 * With no render target, updating the host/GS palette is wasted work.
+	 * BeginRender() marks SNESPPURENDER_UPDATE_ALL on the next frame, so the
+	 * next visible frame rebuilds the complete host palette from emulated CGRAM.
+	 */
 	if (m_pTarget && m_pRenderInfo && m_pBlend)
 	{
 		m_pBlend->UpdatePaletteEntry(&m_pRenderInfo->BlendInfo, uAddr, uData, m_pPPU->GetIntensity());
@@ -201,6 +285,20 @@ void SnesPPURender::RenderLine32(Int32 iLine, Bool bPlanar)
 	SnesRender8pInfoT *pRenderInfo;
     SNPPUBlendInfoT *pBlendInfo;
 	const SnesPPURegsT *pRegs  = m_pPPU->GetRegs();
+	/* AURORA_V85_EFFECTIVE_COLOR_PATH
+	 * Derive renderer-only values. Never mutate emulated PPU registers. */
+	const Uint8 uHackFlags = SNPPURenderGetSoftwareHackFlags();
+	const Uint8 uEffectiveCGWSEL =
+		(uHackFlags & SNPPU_HACK_WINDOWS_OFF)
+		? (Uint8)(pRegs->cgwsel & 0x03) : pRegs->cgwsel;
+	Uint8 uEffectiveCGADSUB =
+		(uHackFlags & SNPPU_HACK_COLOR_MATH_OFF) ? 0 : pRegs->cgadsub;
+#if SNES_SONIC_COLOR_WORKAROUND
+	/* Sonic Blast Man workaround: preserve windows/layers, suppress only
+	 * CGADSUB color math. This is deliberately narrower than the menu hack. */
+	if (g_SnesCompatSonicBlastManColorMath)
+		uEffectiveCGADSUB = 0;
+#endif
 
 	pRenderInfo = m_pRenderInfo;
     pBlendInfo = &pRenderInfo->BlendInfo;
@@ -235,7 +333,8 @@ static Bool bPrint = TRUE;
 			m_UpdateFlags &= ~SNESPPURENDER_UPDATE_PAL;
 		}
 
-		if (m_UpdateFlags & SNESPPURENDER_UPDATE_OBJ)
+		if ((m_UpdateFlags & SNESPPURENDER_UPDATE_OBJ) ||
+		    g_SnesObjLimitVisibilityDirty)
 		{
 #if SNDBG_LOG
 			Uint32 _tObjUpdate = ProfCtrGetCycle();
@@ -254,6 +353,7 @@ static Bool bPrint = TRUE;
 #endif
 
 			m_UpdateFlags &= ~SNESPPURENDER_UPDATE_OBJ;
+			g_SnesObjLimitVisibilityDirty = FALSE;
 		}
 
 		/* Tiles and decoded character rows are cached across scanlines. A VRAM
@@ -275,7 +375,8 @@ static Bool bPrint = TRUE;
 
 	    if (m_UpdateFlags & SNESPPURENDER_UPDATE_WINDOW)
         {
-    		DecodeWindows(pRenderInfo->WindowMask, pRenderInfo->BGWindow);
+			if (!(uHackFlags & SNPPU_HACK_WINDOWS_OFF))
+			DecodeWindows(pRenderInfo->WindowMask, pRenderInfo->BGWindow);
     		m_UpdateFlags &= ~SNESPPURENDER_UPDATE_WINDOW;
         }
 
@@ -291,8 +392,8 @@ static Bool bPrint = TRUE;
 		   all add/sub masks are mathematically unable to change the result.
 		   With main clipping disabled and brightness at 15, the GS can expand
 		   the indexed main line directly into the output texture. */
-		bDirectMain = (pRegs->cgadsub & 0x3F) == 0 &&
-		              (pRegs->cgwsel & 0xC0) == 0 &&
+		bDirectMain = (uEffectiveCGADSUB & 0x3F) == 0 &&
+		              (uEffectiveCGWSEL & 0xC0) == 0 &&
 		              m_pPPU->GetIntensity() == 15;
 #endif
 
@@ -301,7 +402,7 @@ static Bool bPrint = TRUE;
         // 1 = enabled
 		if (!bDirectMain)
 		{
-			switch ((pRegs->cgwsel >> 6) & 3)
+			switch ((uEffectiveCGWSEL >> 6) & 3)
 			{
 			case 0:	// all the time
 				SNMaskSet(&ColorMask[0]);
@@ -321,7 +422,7 @@ static Bool bPrint = TRUE;
 			// determine color window mask for sub screen
 			// 0 = disabled (masked)
 			// 1 = enabled
-			switch ((pRegs->cgwsel >> 4) & 3)
+			switch ((uEffectiveCGWSEL >> 4) & 3)
 			{
 			case 0:	// enabled all the time (only when add/sub layers of main screen are opaque)
 				SNMaskCopy(&ColorMask[1], &pRenderInfo->MainAddSubMask);
@@ -344,7 +445,7 @@ static Bool bPrint = TRUE;
 			//      ANDed with the enabled pixels of the subscreen (opaque, fixed color, and windowed)
 			// Quoth: "in the back color constant area on the sub screen, it does not	become 1/2"
 			// there will never be a case where 1/2 is applied to a main or subscreen color that has been masked by color window
-			if (pRegs->cgadsub & 0x40)
+			if (uEffectiveCGADSUB & 0x40)
 			{
 				// 0 = disabled
 				// 1 = 1/2 add sub enabled
@@ -367,7 +468,7 @@ static Bool bPrint = TRUE;
             iLine,
             pRegs->coldata,
 			bDirectMain ? NULL : ColorMask,
-            (pRegs->cgadsub & 0x80),
+            (uEffectiveCGADSUB & 0x80),
             m_pPPU->GetIntensity()
             );
 #if SNDBG_LOG
@@ -392,6 +493,22 @@ static SNPPUBlendGS *_Blend;
 static SNPPUBlendC _Blend;
 #endif
 
+/* AURORA_GS_VRAM_EPOCH_V4_2
+ * SNPPUBlendGS caches uPalAddr/uInputAddr/uTempAddr/uOutAddr at construction.
+ * After GSK_ReinitVideo() those TBPs no longer belong to the current gsKit
+ * allocation epoch. Delete only while no frame is active; BeginRender lazily
+ * creates a fresh blender with the current globals on the next SNES frame. */
+void SNPPURenderInvalidateGsResources(void)
+{
+#if CODE_PLATFORM == CODE_PS2
+    if (_Blend)
+    {
+        delete _Blend;
+        _Blend = NULL;
+    }
+#endif
+}
+
 #if !SNPPURENDER_INFOSCRATCHPAD
 static SnesRender8pInfoT _RenderInfo;
 #endif
@@ -402,6 +519,15 @@ static SnesRender8pInfoT _RenderInfo;
 
 void SnesPPURender::BeginRender(CRenderSurface *pTarget)
 {
+	/* AURORA_OBJ_LIMIT_FLICKER_V3
+	 * Rotate artificial limiter victims across rendered frames. The
+	 * physical SNES 32-OBJ / 34-tile rules are not changed. */
+	if (pTarget && g_SnesObjLimitLevel != SNPPU_OBJ_LIMIT_OFF)
+	{
+		g_SnesObjLimitFramePhase++;
+		if (g_SnesObjLimitMode == SNPPU_OBJ_LIMIT_MODE_SCREEN)
+			g_SnesObjLimitVisibilityDirty = TRUE;
+	}
 #if CODE_PLATFORM == CODE_PS2
 	if (!_Blend)
 	{
@@ -440,8 +566,11 @@ void SnesPPURender::BeginRender(CRenderSurface *pTarget)
 void SnesPPURender::EndRender()
 {
     #if CODE_PLATFORM == CODE_PS2
-	if (m_pTarget)
-		DmaSyncSprToRam();
+    /* AURORA_SNES_SAFE_FRAMESKIP_HOST_ELIDE_V1_20260828
+     * A NULL render target produces no visible-frame SPR->RAM work here.
+     * Avoid polling DMA8 on frames intentionally hidden by Safe Frameskip. */
+    if (m_pTarget)
+        DmaSyncSprToRam();
     #endif
 
 	if (m_pTarget)

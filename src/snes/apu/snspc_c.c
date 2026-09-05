@@ -4,7 +4,7 @@
 Todo: 
 Half carry support
 
-Read 16-bit value from dp does not wrap!
+Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 
  
  */
@@ -28,14 +28,47 @@ Read 16-bit value from dp does not wrap!
 //#define SNSPC_SUBCYCLES(_nCycles)			pCpu->Cycles-= ((_nCycles)*SNSPC_CYCLE) >> pCpu->uCycleShift;
 #define SNSPC_SUBCYCLES(_nCycles)			nCycles-= ((_nCycles)*SNSPC_CYCLE);
 
-#define SNSPC_FETCH8(_Reg)  _Reg=_SNSPCFetch8(pCpu, rPC);  rPC++;  
-#define SNSPC_FETCH16(_Reg) _Reg=_SNSPCFetch16(pCpu, rPC); rPC+=2; 
+/* AURORA_SAFE_CODE_PERF_V1_SPC
+ * The 8-bit fetch/read/write wrappers below were pure forwarding layers.
+ * Keep cycle publication and trap handling exactly where they already are,
+ * but let the hot interpreter reach APURAM / the existing inline trap helper
+ * directly.  This is source-level dispatch cleanup only. */
+#define SNSPC_FETCH8(_Reg)  _Reg=pCpu->Mem[rPC];  rPC++;
+#define SNSPC_FETCH16(_Reg) _Reg=(Uint32)pCpu->Mem[rPC] | ((Uint32)pCpu->Mem[rPC+1] << 8); rPC+=2;
 
-#define SNSPC_WRITE8(_Addr, _Data)  pCpu->Cycles = nCycles; _SNSPCWrite8(pCpu, _Addr, _Data);  
-#define SNSPC_WRITE16(_Addr, _Data) pCpu->Cycles = nCycles; _SNSPCWrite16(pCpu, _Addr, _Data); 
+#define SNSPC_WRITE8(_Addr, _Data)  pCpu->Cycles = nCycles; __SNSPCWrite8(pCpu, _Addr, _Data);
+#define SNSPC_WRITE16(_Addr, _Data) pCpu->Cycles = nCycles; _SNSPCWrite16(pCpu, _Addr, _Data);
 
-#define SNSPC_READ8(_Addr, _x)  pCpu->Cycles = nCycles; _x = _SNSPCRead8(pCpu, _Addr);  
-#define SNSPC_READ16(_Addr, _x) pCpu->Cycles = nCycles; _x = _SNSPCRead16(pCpu, _Addr); 
+#define SNSPC_READ8(_Addr, _x)  pCpu->Cycles = nCycles; _x = __SNSPCRead8(pCpu, _Addr);
+#define SNSPC_READ16(_Addr, _x) pCpu->Cycles = nCycles; _x = _SNSPCRead16(pCpu, _Addr);
+
+/*
+ * SPC700 direct-page word accesses wrap inside the selected direct page.
+ *
+ * dp=$00FF -> high byte at $0000
+ * dp=$01FF -> high byte at $0100
+ *
+ * Keep ordinary SNSPC_READ16/SNSPC_WRITE16 unchanged for absolute
+ * addressing; these helpers are used only by DP addressing modes.
+ */
+#define SNSPC_READDP16(_Addr, _x) do {                              \
+    Uint32 _snspc_dp_addr = (_Addr);                                \
+    Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);    \
+    pCpu->Cycles = nCycles;                                         \
+    (_x)  = __SNSPCRead8(pCpu, _snspc_dp_addr);                      \
+    (_x) |= ((Uint32)__SNSPCRead8(pCpu, _snspc_dp_hi)) << 8;         \
+} while (0)
+
+#define SNSPC_WRITEDP16(_Addr, _Data) do {                           \
+    Uint32 _snspc_dp_addr = (_Addr);                                 \
+    Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);     \
+    Uint32 _snspc_dp_data = (_Data);                                 \
+    pCpu->Cycles = nCycles;                                          \
+    __SNSPCWrite8(pCpu, _snspc_dp_addr, (Uint8)_snspc_dp_data);      \
+    __SNSPCWrite8(pCpu, _snspc_dp_hi,                                \
+                 (Uint8)(_snspc_dp_data >> 8));                      \
+} while (0)
+
 
 #define SNSPC_PUSH8(_Data)	_SNSPCPush8(pCpu, _Data);  
 #define SNSPC_PUSH16(_Data)	_SNSPCPush16(pCpu, _Data);  
@@ -275,36 +308,15 @@ Read 16-bit value from dp does not wrap!
 //
 //
 
-static __inline Uint8 _SNSPCFetch8(SNSpcT *pCpu, Uint32 uAddr)
-{
-	return pCpu->Mem[uAddr];
-}
-
-static __inline Uint16 _SNSPCFetch16(SNSpcT *pCpu, Uint32 uAddr)
-{
-	return pCpu->Mem[uAddr] | (pCpu->Mem[uAddr+1]<<8);
-}
-
 
 static __inline Uint8 __SNSPCRead8(SNSpcT *pCpu, Uint32 uAddr)
 {
-	if (uAddr >= 0xF0 && uAddr < 0x100)
-	{
+	if ((uAddr - 0xF0u) < 0x10u)
 		return pCpu->pReadTrapFunc(pCpu, uAddr);
-	} else
-	{
-		return pCpu->Mem[uAddr];
-	}
+	return pCpu->Mem[uAddr];
 }
 
-static Uint8 _SNSPCRead8(SNSpcT *pCpu, Uint32 Addr)
-{
-	Uint32 uData;
-	uData =  __SNSPCRead8(pCpu, Addr);
-	return  uData;
-}
-
-static Uint16 _SNSPCRead16(SNSpcT *pCpu, Uint32 Addr)
+static __inline Uint16 _SNSPCRead16(SNSpcT *pCpu, Uint32 Addr)
 {
 	Uint32 uData;
 	uData =  __SNSPCRead8(pCpu, Addr);
@@ -314,48 +326,30 @@ static Uint16 _SNSPCRead16(SNSpcT *pCpu, Uint32 Addr)
 
 static __inline void  __SNSPCWrite8(SNSpcT *pCpu, Uint32 uAddr, Uint8 uData)
 {
-	// don't write to rom area
-	if (uAddr < SNSPC_ROM_ADDR)
-	{
+	// Ordinary APURAM and disabled-IPL writes have the same destination.
+	if (uAddr < SNSPC_ROM_ADDR || !pCpu->bRomEnable)
 		pCpu->Mem[uAddr] = uData;
-	}
 	else
-	if (!pCpu->bRomEnable)
-	{
-		// rom is disabled
-		pCpu->Mem[uAddr] = uData;
-//		pCpu->pWriteTrapFunc(pCpu, uAddr, uData);
-	} else
-	{
-		// rom is enabled
-		pCpu->ShadowMem[uAddr & (SNSPC_ROM_SIZE -1)] = uData;
-	}
+		pCpu->ShadowMem[uAddr & (SNSPC_ROM_SIZE - 1)] = uData;
 
-	if (uAddr >= 0xF0 && uAddr < 0x100)
-	{
+	if ((uAddr - 0xF0u) < 0x10u)
 		pCpu->pWriteTrapFunc(pCpu, uAddr, uData);
-	}
 }
 
-static void  _SNSPCWrite8(SNSpcT *pCpu, Uint32 Addr, Uint8 Data)
+static __inline void _SNSPCWrite16(SNSpcT *pCpu, Uint32 Addr, Uint16 Data)
 {
-	__SNSPCWrite8(pCpu, Addr + 0, Data >> 0);
-}
-
-static void  _SNSPCWrite16(SNSpcT *pCpu, Uint32 Addr, Uint16 Data)
-{
-	__SNSPCWrite8(pCpu, Addr + 0, Data >> 0);
+	__SNSPCWrite8(pCpu, Addr, (Uint8)Data);
 	__SNSPCWrite8(pCpu, Addr + 1, Data >> 8);
 }
 
 
-static void _SNSPCPush8(SNSpcT *pCpu, Uint8 Data)
+static __inline void _SNSPCPush8(SNSpcT *pCpu, Uint8 Data)
 {
 	pCpu->Mem[r_SP + 0x100] = Data;
 	r_SP--;
 }
 
-static void _SNSPCPush16(SNSpcT *pCpu, Uint16 Data)
+static __inline void _SNSPCPush16(SNSpcT *pCpu, Uint16 Data)
 {
 	pCpu->Mem[r_SP + 0x100] = (Uint8)(Data >> 8);
 	r_SP--;
@@ -363,13 +357,13 @@ static void _SNSPCPush16(SNSpcT *pCpu, Uint16 Data)
 	r_SP--;
 }
 
-static Uint8 _SNSPCPop8(SNSpcT *pCpu)
+static __inline Uint8 _SNSPCPop8(SNSpcT *pCpu)
 {
 	r_SP++;
 	return pCpu->Mem[r_SP + 0x100];
 }
 
-static Uint16 _SNSPCPop16(SNSpcT *pCpu)
+static __inline Uint16 _SNSPCPop16(SNSpcT *pCpu)
 {
 	Uint32 uData;
 	r_SP++;

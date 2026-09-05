@@ -166,18 +166,23 @@ public:
 	SnesPPU();
 
 	void                    Reset();
+	void                    SoftReset();
 	void                    BeginFrame();
 	void                    EndFrame();
+void SetRegionPAL(Bool bPAL);
 	void                    SetPPURender(ISnesPPURender *pPPURender)    {m_pRender=pPPURender;}
 
 	const SnesPPURegsT *    GetRegs() const                             {return &m_Regs;}
 	SnesOAMT *              GetOAM()                                    {return &m_OAM;}
 	Uint16 *                GetVramPtr(Uint32 uVramAddr)                {return &m_VRAM[uVramAddr & 0x7FFF];}
-	Bool                    IsForceBlank() const                        {return !(m_Regs.inidisp & 0x80);}
+	/* AURORA_SNES_FORCEBLANK_V1: INIDISP bit 7 means forced blank. */
+	Bool                    IsForceBlank() const                        {return (m_Regs.inidisp & 0x80) != 0;}
 	Bool                    InVBlank() const                            {return m_bVBlank;}
 	Uint32                  GetIntensity()  const                       {return m_Regs.inidisp & 0xF;}
 
 	#if SNPPU_WRITEQUEUE
+	/* AURORA_REVIVE_005CEE_PPU_ENQUEUE_INLINE_20260829
+	 * Hot path compartilhado por CPU writes e HDMA direto. */
 	_INLINE Bool            EnqueueWrite(Uint32 uLine, Uint32 uAddr, Uint8 uData,
 	                                    Bool bCountFailure = TRUE)
 	{
@@ -209,6 +214,15 @@ public:
 	Uint8                   ReadVMDATAL();
 	Uint8                   ReadVMDATAH();
 
+	/* AURORA_MEGA_V2_PPU_MDR
+	 * Separate data-bus latches for the two S-PPU chips. These are
+	 * internal open-bus state, deliberately kept outside SnesPPURegsT
+	 * so the existing save-state/register layout stays unchanged. */
+	Uint8                   GetPPU1MDR() const { return m_PPU1MDR; }
+	Uint8                   GetPPU2MDR() const { return m_PPU2MDR; }
+	void                    SetPPU1MDR(Uint8 uData) { m_PPU1MDR = uData; }
+	void                    SetPPU2MDR(Uint8 uData) { m_PPU2MDR = uData; }
+
 
 	SnesColor16T            GetCG(Uint32 uEntry)  const                       {return m_CGRAM[uEntry];}
 	SnesColor16T *          GetCGData()                                       {return m_CGRAM;}
@@ -229,15 +243,19 @@ private:
     Uint16			        m_VRAM[SNESPPU_VRAM_NUMWORDS] _ALIGN(16);
     SnesOAMT		        m_OAM;
 	Uint8                   m_OAMLatch;
+	/* AURORA_ACCURACY_PPU_LATCHES_V1 */
 	Uint8                   m_CGRAMLatch;
+	Uint8                   m_PPU1MDR;
+	Uint8                   m_PPU2MDR;
 
     ISnesPPURender *        m_pRender;
 
 #if SNPPU_WRITEQUEUE
-    SNPPUQueue			    m_Queue;	// raster write queue
+    SNPPUQueue			m_Queue;	// raster write queue
 #endif
 
     void                    UpdateMatMul();
+	void                    UpdateVRAMReadBuffer();
 	void                    UpdateOAMPriority();
 };
 

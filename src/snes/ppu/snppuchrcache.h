@@ -4,6 +4,14 @@
 #include <string.h>
 #include "types.h"
 
+/* AURORA_TOPGEAR_HFLIP_CACHE
+ * Cache a pre-flipped copy of decoded 4bpp CHR rows.
+ * Both orientations share the same VRAM validity bitmap.
+ */
+#ifndef SNPPU_CHR_CACHE_HFLIP
+#define SNPPU_CHR_CACHE_HFLIP 1
+#endif
+
 /*
  * Cache fisico de CHR decodificado.
  *
@@ -15,8 +23,9 @@
  *
  * Cada linha guarda oito indices de cor sem paleta. BG e OBJ 4bpp usam a
  * MESMA tabela; trocar CGRAM, prioridade ou paleta nao invalida os pixels.
- * A orientacao canonica e' sem H-flip. O flip e' feito somente na saida,
- * evitando duplicar quase 450 KiB de dados.
+ * A orientacao canonica e' sem H-flip. Com o switch H-flip ligado,
+ * uma copia 4bpp pre-invertida acrescenta 147456 bytes; com =0, o
+ * caminho canonico faz a reversao na saida como na base r29.
  *
  * Diferente dos caches experimentais de linha, um hit nao le a fonte da
  * VRAM, nao calcula hash e nao disputa uma entrada de 512 slots. Escritas em
@@ -37,6 +46,12 @@ struct SnesPPUChrCacheT
 
 	Uint64 uData4[SNPPU_CHR4_TILE_COUNT][8];
 	Uint8  uOpaque4[SNPPU_CHR4_TILE_COUNT][8];
+
+#if SNPPU_CHR_CACHE_HFLIP
+	Uint64 uData4HFlip[SNPPU_CHR4_TILE_COUNT][8];
+	Uint8  uOpaque4HFlip[SNPPU_CHR4_TILE_COUNT][8];
+#endif
+
 	Uint8  uValid4[SNPPU_CHR4_TILE_COUNT];
 };
 
@@ -89,10 +104,23 @@ _INLINE Bool SnesPPUChrCacheLookup4(const SnesPPUChrCacheT *pCache,
 	if (!(pCache->uValid4[uTile] & (1u << uRow)))
 		return FALSE;
 
+#if SNPPU_CHR_CACHE_HFLIP
+	if (bHFlip)
+	{
+		*pData = pCache->uData4HFlip[uTile][uRow];
+		*pOpaque = pCache->uOpaque4HFlip[uTile][uRow];
+	}
+	else
+	{
+		*pData = pCache->uData4[uTile][uRow];
+		*pOpaque = pCache->uOpaque4[uTile][uRow];
+	}
+#else
 	*pData = pCache->uData4[uTile][uRow];
 	*pOpaque = pCache->uOpaque4[uTile][uRow];
 	if (bHFlip)
 		SnesPPUChrCacheFlipRow(pData, pOpaque);
+#endif
 	return TRUE;
 }
 
@@ -117,8 +145,36 @@ _INLINE void SnesPPUChrCacheStore4(SnesPPUChrCacheT *pCache,
 
 	pCache->uData4[uTile][uRow] = uData;
 	pCache->uOpaque4[uTile][uRow] = (Uint8)uOpaque;
+
+#if SNPPU_CHR_CACHE_HFLIP
+	pCache->uData4HFlip[uTile][uRow] = SnesPPUChrCacheReverseBytes(uData);
+	pCache->uOpaque4HFlip[uTile][uRow] =
+		SnesPPUChrCacheReverseMask((Uint8)uOpaque);
+#endif
+
 	pCache->uValid4[uTile] |= (Uint8)(1u << uRow);
 }
+
+#if SNPPU_CHR_CACHE_HFLIP
+/* AURORA_HFLIP_MISS_REUSE_V1
+ * Store4() has already produced this mirrored row. The first H-flipped
+ * consumer can load it directly instead of doing the byte/mask reversal
+ * a second time.
+ */
+_INLINE void SnesPPUChrCacheLoad4HFlip(
+	const SnesPPUChrCacheT *pCache,
+	Uint32 uRowAddress,
+	Uint64 *pData,
+	Uint32 *pOpaque)
+{
+	Uint32 uAddress = uRowAddress & SNPPU_VRAM_WORD_MASK;
+	Uint32 uTile = uAddress >> 4;
+	Uint32 uRow = uAddress & 7u;
+
+	*pData = pCache->uData4HFlip[uTile][uRow];
+	*pOpaque = pCache->uOpaque4HFlip[uTile][uRow];
+}
+#endif
 
 _INLINE void SnesPPUChrCacheInvalidateAll(SnesPPUChrCacheT *pCache)
 {

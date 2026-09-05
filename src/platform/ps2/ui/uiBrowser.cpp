@@ -21,6 +21,7 @@
 #endif
 #include "poly.h"
 #include "uiBrowser.h"
+#include "mainloop_menu.h"
 #include "uiCover.h"
 #include "mainloop_bgm.h"
 #include "mainloop_smb.h"
@@ -31,13 +32,13 @@ extern "C" {
 #include "mcsave_ee.h"
 };
 
-#include "embedded_irx.h"   /* lazy storage stacks (USB/CDFS/HDD/MMCE) */
+#include "embedded_irx.h"   /* HddSupportIsEnabled / HddLoadEmbeddedIrx */
 
 static const char *_MenuEntries[]=
 {
-	"\xe5\xa4\x8d\xe5\x88\xb6\xe6\x96\x87\xe4\xbb\xb6",  /* 复制文件 */
-	"\xe7\xb2\x98\xe8\xb4\xb4\xe6\x96\x87\xe4\xbb\xb6",  /* 粘贴文件 */
-	"\xe5\x88\xa0\xe9\x99\xa4\xe6\x96\x87\xe4\xbb\xb6",  /* 删除文件 */
+	"复制文件",
+	"粘贴文件",
+	"删除文件",
 	NULL
 };
 
@@ -75,21 +76,18 @@ static Bool BrowserIsSramDirectoryName(const Char *pName)
 	       (!strcasecmp(pName, "SNES") || !strcasecmp(pName, "NES"));
 }
 
+static Bool BrowserIsSramFileName(const Char *pName)
+{
+    size_t nLength = pName ? strlen(pName) : 0;
+
+    return nLength >= 4 &&
+           pName[nLength - 4] == '.' &&
+           !strcasecmp(pName + nLength - 3, "srm");
+}
+
 static Bool BrowserIsSmbPath(const Char *pPath)
 {
 	return pPath && strncasecmp(pPath, "smb:", 4) == 0;
-}
-
-static Bool BrowserIsMassPath(const Char *pPath)
-{
-	return pPath && strncasecmp(pPath, "mass", 4) == 0;
-}
-
-static Bool BrowserIsDiscPath(const Char *pPath)
-{
-	return pPath &&
-	       (strncasecmp(pPath, "cdfs:", 5) == 0 ||
-	        strncasecmp(pPath, "cdrom", 5) == 0);
 }
 
 /* Resolve the rare DT_UNKNOWN equivalent without slowing down normal ROM
@@ -152,80 +150,15 @@ static int BrowserOpenDirectory(const Char *pPath)
 	int dfd;
 	int attempt;
 	Bool bSmb;
-	Bool bMass;
-	Bool bDisc;
 
 	if (!pPath)
 		return -1;
-
-	/* Optional storage must never run in main() before the GS exists.  Start
-	   it only for the drive the user selected, with a visible marker.  If an
-	   old Fat/Slim-specific module wait ever stalls, it can no longer produce
-	   an unexplained OPL black/white boot screen. */
-	bMass = BrowserIsMassPath(pPath);
-	if (bMass && !UsbBdmIsLoaded() && !Mx4sioIsLoaded())
-	{
-		MainLoopModalPrintf(1, "USB: Starting driver...");
-		if (UsbBdmLoadEmbeddedIrx() < 0)
-		{
-			MainLoopModalPrintf(180, "USB: Driver failed (%d)",
-			                    UsbBdmGetLastError());
-			return -1;
-		}
-	}
-
-	/* ATA BDM ASSAULT: after BDM core is available (either via USB above or
-	   MX4SIO loaded earlier in the session), and only when the explicit
-	   toggle is on, start the ATA→BDM transport so the internal PATA HDD
-	   formatted with FAT16/FAT32/exFAT + MBR/GPT is enumerated as an
-	   additional massN: unit.  Internal APA HDD is handled separately via
-	   the dedicated hdd0:/ lazy-load path and is mutually exclusive at
-	   runtime.  If DEV9/ATA hangs (no drive, or expansion-bay missing),
-	   the failure is reported instead of blocking the browser permanently. */
-	if (bMass && AtaBdmAssaultIsEnabled() && !AtaBdmAssaultIsLoaded() &&
-	    (UsbBdmIsLoaded() || Mx4sioIsLoaded()))
-	{
-		int ataErr;
-		MainLoopModalPrintf(1, "ATA: Starting HDD driver...");
-		ataErr = AtaBdmAssaultLoadEmbeddedIrx();
-		if (ataErr < 0 && ataErr != EMBEDDED_IRX_ERROR_RESTART_REQUIRED)
-		{
-			MainLoopModalPrintf(180, "ATA: Driver failed (%d)",
-			                    AtaBdmAssaultGetLastError());
-			/* Driver failure here is non-fatal for browsing: USB mass,
-			   MX4SIO mass and every other device are still usable.  Only
-			   the ATA-backed massN: slot stays empty.  So return normally
-			   after showing the error banner -- the dopen() below simply
-			   returns no entries for that unit and the user sees an
-			   empty folder. */
-		}
-		else if (ataErr == EMBEDDED_IRX_ERROR_RESTART_REQUIRED)
-		{
-			/* Causes: APA hdd0: stack resident, or ps2dev9 resident (SMB/
-			   network used this session) -- both own hardware that the
-			   ATA-Assault bundled drivers cannot share. */
-			MainLoopModalPrintf(180,
-				"ATA: HDD busy (APA/dev9); reboot to switch");
-		}
-	}
-
-	bDisc = BrowserIsDiscPath(pPath);
-	if (bDisc && !CdfsIsLoaded())
-	{
-		MainLoopModalPrintf(1, "CD/DVD: Starting driver...");
-		if (CdfsLoadEmbeddedIrx() < 0)
-		{
-			MainLoopModalPrintf(180, "CD/DVD: Driver failed (%d)",
-			                    CdfsGetLastError());
-			return -1;
-		}
-	}
 
 	/* Network, DHCP, authentication and smbman are all lazy. Nothing touches
 	   DEV9 during boot; the explicit selection of smb: is the trigger. */
 	bSmb = BrowserIsSmbPath(pPath);
 	if (bSmb && !SmbIsMounted())
-		MainLoopModalPrintf(1, "SMB: Connecting...");
+		MainLoopModalPrintf(1, "SMB: 正在连接...");
 	if (bSmb && SmbEnsureMounted() < 0)
 		return -1;
 
@@ -234,7 +167,7 @@ static int BrowserOpenDirectory(const Char *pPath)
 		SmbReportBrowseError(dfd);
 	else if (bSmb)
 		SmbReportBrowseSuccess();
-	if (dfd >= 0 || !bMass)
+	if (dfd >= 0 || strncasecmp(pPath, "mass", 4) != 0)
 		return dfd;
 
 	for (attempt = 0; attempt < BROWSER_MASS_OPEN_RETRIES; ++attempt)
@@ -280,7 +213,10 @@ static int BrowserOpenDirectory(const Char *pPath)
    per row, so it allowed rows to collide with the green footer text. */
 #define BROWSER_LIST_TOP        (32)
 #define BROWSER_FOOTER_TOP      (211)
-#define BROWSER_ROW_ADVANCE     (11)
+/* 17px leaves a clearly visible 5px gap between CJK rows (see
+   FontGetRowAdvance). Real-hardware tests: 11px overlapped hanzi, 13px
+   (1px gap) and 15px (3px gap) still read as crowded over composite. */
+#define BROWSER_ROW_ADVANCE     (17)
 #define BROWSER_VISIBLE_LINES   ((BROWSER_FOOTER_TOP - BROWSER_LIST_TOP) / BROWSER_ROW_ADVANCE)
 
 /* When cover art (capas) is enabled the ROM list name column shrinks to
@@ -356,25 +292,11 @@ static Int32 _BrowserSpaceWidth(void)
 	return s_w;
 }
 
-/* Byte length of the UTF-8 sequence starting at p (1 for ASCII and for
-   stray continuation bytes, which the font renderer shows as tofu).
-   Truncation/scroll helpers use this so they only ever cut between
-   characters, never inside a multi-byte name. */
-static size_t _BrowserUtf8Len(const Char *p)
-{
-	unsigned char c = (unsigned char)p[0];
-
-	if (c < 0x80)          return 1;
-	if ((c & 0xE0) == 0xC0) return 2;
-	if ((c & 0xF0) == 0xE0) return 3;
-	if ((c & 0xF8) == 0xF0) return 4;
-	return 1;
-}
-
 /* Build a trimmed copy of src into out, sized so it fits in max_px
-   pixels (including the trailing "..." if truncation was needed).
-   When the source already fits, it is copied verbatim. Drop-in
-   replacement for the previous fixed `str[120] = 0` hard cap. */
+   pixels (including the trailing ellipsis if truncation was needed).
+   When the source already fits, it is copied verbatim.  Steps whole
+   UTF-8/GBK characters (FontCharLen) so CJK names are never cut mid
+   sequence (which would render as garbage). */
 static void BrowserCopyEllipsis(Char *out, size_t out_size, const Char *src, Int32 max_px)
 {
 	if (!out || out_size == 0)
@@ -394,59 +316,59 @@ static void BrowserCopyEllipsis(Char *out, size_t out_size, const Char *src, Int
 		return;
 
 	{
-		Char dots[] = "...";
+		Char dots[] = "\xE2\x80\xA6";   /* U+2026 HORIZONTAL ELLIPSIS */
 		Int32 dotsW = FontGetStrWidth(dots);
 
-		/* Degenerate budget: not even "..." fits. Render whatever bit
-		   does fit char-by-char and bail. */
+		/* Degenerate budget: not even the ellipsis fits. Render whatever
+		   bit does fit char-by-char and bail. */
 		if (dotsW > max_px)
 		{
 			size_t i = 0;
 			while (src[i] && i + 1 < out_size)
 			{
-				size_t cl = _BrowserUtf8Len(src + i);
-				if (i + cl + 1 > out_size)
+				Int32 clen = FontCharLen(src + i);
+				if (clen <= 0 || i + (size_t)clen >= out_size)
 					break;
-				memcpy(out + i, src + i, cl);
-				out[i + cl] = '\0';
+				memcpy(out + i, src + i, (size_t)clen);
+				out[i + clen] = '\0';
 				if (FontGetStrWidth(out) > max_px)
 				{
-					out[i] = '\0';
+					if (i > 0)
+						out[i] = '\0';
 					break;
 				}
-				i += cl;
+				i += (size_t)clen;
 			}
 			return;
 		}
 
 		/* Find the longest prefix of src that fits in (max_px - dotsW)
-		   pixels, then append "...". Probes advance by whole UTF-8
-		   codepoints so a multi-byte name is never cut mid-sequence. */
+		   pixels, then append the ellipsis.  Appends whole characters;
+		   each probe keeps the rolling width. */
 		{
 			size_t i = 0;
 			out[0] = '\0';
 			while (src[i] && i + 4 < out_size)
 			{
-				size_t cl = _BrowserUtf8Len(src + i);
-				if (i + cl + 1 > out_size)
+				Int32 clen = FontCharLen(src + i);
+				if (clen <= 0 || i + (size_t)clen + 1 >= out_size)
 					break;
-				memcpy(out + i, src + i, cl);
-				out[i + cl] = '\0';
+				memcpy(out + i, src + i, (size_t)clen);
+				out[i + clen] = '\0';
 				if (FontGetStrWidth(out) > max_px - dotsW)
 				{
-					out[i] = '\0';
+					if (i > 0)
+						out[i] = '\0';
 					break;
 				}
-				i += cl;
+				i += (size_t)clen;
 			}
 			{
 				size_t n = strlen(out);
-				if (n + 4 <= out_size)
+				size_t dl = strlen(dots);
+				if (n + dl < out_size)
 				{
-					out[n + 0] = '.';
-					out[n + 1] = '.';
-					out[n + 2] = '.';
-					out[n + 3] = '\0';
+					memcpy(out + n, dots, dl + 1);
 				}
 			}
 		}
@@ -459,7 +381,9 @@ static void BrowserCopyEllipsis(Char *out, size_t out_size, const Char *src, Int
    coordinates into a huge positive value, which draws a stray
    horizontal streak across the screen. So the scroll steps by whole
    chars - glitch-free, at the cost of not being sub-pixel smooth. At
-   the end the longest fitting suffix is shown so ".nes" is never cut. */
+   the end the longest fitting suffix is shown so ".nes" is never cut.
+   Character boundaries are UTF-8/GBK aware (FontCharLen) so CJK names
+   scroll cleanly. */
 static void BrowserCopyMarquee(Char *out, size_t out_size, const Char *src,
                                Int32 max_px, Uint32 tick)
 {
@@ -491,27 +415,31 @@ static void BrowserCopyMarquee(Char *out, size_t out_size, const Char *src,
 		if (pxOffset >= maxOffset)
 		{
 			/* End: longest suffix that fits, so the final chars (".nes")
-			   are never clipped. Advance by whole codepoints. */
+			   are never clipped. */
 			while (src[startChar] && FontGetStrWidth(src + startChar) > max_px)
-				startChar += _BrowserUtf8Len(src + startChar);
+			{
+				Int32 clen = FontCharLen(src + startChar);
+				startChar += (clen > 0) ? (size_t)clen : 1;
+			}
 		}
 		else
 		{
 			/* Mid-scroll: first char whose cumulative width crosses
-			   pxOffset (codepoint-boundary start, x stays >= vx). */
+			   pxOffset (char-boundary start, x stays >= vx). */
 			Int32 cumW = 0;
-			Char  tmp[8];
+			Char  tmp[8] = {0};
 			while (src[startChar])
 			{
-				size_t cl = _BrowserUtf8Len(src + startChar);
-				if (cl >= sizeof(tmp)) cl = sizeof(tmp) - 1;
-				memcpy(tmp, src + startChar, cl);
-				tmp[cl] = '\0';
+				Int32 clen = FontCharLen(src + startChar);
+				if (clen <= 0 || clen > 6)
+					clen = 1;
+				memcpy(tmp, src + startChar, (size_t)clen);
+				tmp[clen] = '\0';
 				Int32 cw = FontGetStrWidth(tmp);
 				if (cumW + cw > pxOffset)
 					break;
 				cumW += cw;
-				startChar += cl;
+				startChar += (size_t)clen;
 			}
 		}
 
@@ -519,19 +447,19 @@ static void BrowserCopyMarquee(Char *out, size_t out_size, const Char *src,
 		idx = startChar;
 		while (src[idx] && i + 1 < out_size)
 		{
-			size_t cl = _BrowserUtf8Len(src + idx);
-			if (i + cl + 1 > out_size)
+			Int32 clen = FontCharLen(src + idx);
+			if (clen <= 0 || i + (size_t)clen >= out_size)
 				break;
-			memcpy(out + i, src + idx, cl);
-			i += cl;
-			out[i] = '\0';
+			memcpy(out + i, src + idx, (size_t)clen);
+			out[i + clen] = '\0';
 			if (FontGetStrWidth(out) > max_px)
 			{
-				i -= cl;
-				out[i] = '\0';
+				if (i > 0)
+					out[i] = '\0';
 				break;
 			}
-			idx += cl;
+			i += (size_t)clen;
+			idx += (size_t)clen;
 		}
 	}
 }
@@ -795,17 +723,28 @@ static void _StarfieldDraw(void)
 
 int CBrowserScreen::GetEntryPath(char *pStr, int nChars)
 {
-	if (m_iSelect >=0 && m_iSelect < m_nEntries)
-		return snprintf(pStr, nChars, "%s%s", m_Dir, m_pDirEntries[m_iSelect].name);
-	else 
+	int nWritten;
+
+	/* AURORA_RUNTIME_SAFE_BROWSER_PATH_V1_4_2 */
+	if (!pStr || nChars <= 0 ||
+	    m_iSelect < 0 || m_iSelect >= m_nEntries)
 		return 0;
+
+	nWritten = snprintf(
+		pStr, nChars, "%s%s", m_Dir, m_pDirEntries[m_iSelect].name);
+	if (nWritten <= 0 || nWritten >= nChars)
+	{
+		pStr[0] = '\0';
+		return 0;
+	}
+	return nWritten;
 }
 
 char *CBrowserScreen::GetEntryName()
 {
 	if (m_iSelect >=0 && m_iSelect < m_nEntries)
 		return m_pDirEntries[m_iSelect].name;
-	else 
+	else
 		return NULL;
 }
 
@@ -813,7 +752,7 @@ BrowserEntryTypeE CBrowserScreen::GetEntryType()
 {
 	if (m_iSelect >=0 && m_iSelect < m_nEntries)
 		return m_pDirEntries[m_iSelect].eType;
-	else 
+	else
 		return BROWSER_ENTRYTYPE_OTHER;
 }
 
@@ -857,9 +796,19 @@ int CBrowserScreen::MenuEvent(Uint32 Type, Uint32 Parm1, void *Parm2)
 						case BROWSER_ENTRYTYPE_DIR:
 							break;
 						default:
-							pBrowser->m_SubMenu.SetText(0, str);
-							pBrowser->m_SubMenu.SetText(1, pBrowser->GetEntryName());
+						pBrowser->m_SubMenu.SetText(0, str);
+						/* SetText is bounded in V1.4.2. If the complete
+						   source path did not fit, do not arm Paste with a
+						   different/truncated path. */
+						if (strcmp(pBrowser->m_SubMenu.GetText(0), str) != 0)
+						{
+							pBrowser->m_SubMenu.SetText(0, "");
+							pBrowser->m_SubMenu.SetText(1, "");
+							MainLoopStatusPrintf(180, "复制路径过长。");
 							break;
+						}
+						pBrowser->m_SubMenu.SetText(1, pBrowser->GetEntryName());
+						break;
 					}
 					break;
 				case 1: // Paste file
@@ -879,7 +828,7 @@ int CBrowserScreen::MenuEvent(Uint32 Type, Uint32 Parm1, void *Parm2)
 						pExt = strrchr(strDestFileName, '.');
 						if (pExt)
 						{
-							// special case .gz extensions							
+							// special case .gz extensions
 							if (!strcmp(pExt, ".gz"))
 							{
 								*pExt = '\0';
@@ -899,7 +848,7 @@ int CBrowserScreen::MenuEvent(Uint32 Type, Uint32 Parm1, void *Parm2)
 						}
 						// truncate file name
 						PathTruncFileName(strDestShortName, strDestFileName, PathGetMaxFileNameLength(pBrowser->m_Dir) - strlen(strDestFileExt));
-						
+
 						snprintf(strDestPath, sizeof(strDestPath), "%s%s%s", pBrowser->m_Dir, strDestShortName, strDestFileExt);
 						snprintf(strSrcPath, sizeof(strSrcPath), "%s", pBrowser->m_SubMenu.GetText(0));
 
@@ -988,6 +937,7 @@ CBrowserScreen::CBrowserScreen(Uint32 uMaxEntries)
 	m_bMCDir = FALSE;
 	m_bSubMenu = FALSE;
 	m_bStateManager = FALSE;
+m_bSramManager = FALSE;
 	m_bHasExecutables = FALSE;
 	m_pDirEntries = NULL;
 
@@ -995,7 +945,7 @@ CBrowserScreen::CBrowserScreen(Uint32 uMaxEntries)
 	if (uMaxEntries > 0 && uMaxEntries <= (Uint32)INT_MAX)
 		EnsureEntryCapacity((Int32)uMaxEntries);
 
-	m_SubMenu.SetTitle("\xe6\x96\x87\xe4\xbb\xb6\xe8\x8f\x9c\xe5\x8d\x95");  /* 文件菜单 */
+	m_SubMenu.SetTitle("文件菜单");
 	m_SubMenu.SetEntries((char **)_MenuEntries);
 	m_SubMenu.SetMsgFunc(MenuEvent);
 	m_SubMenu.SetUserData(this);
@@ -1013,6 +963,8 @@ void CBrowserScreen::ResetEntries()
 	m_iScroll  = 0;
 	m_bCapacityError = FALSE;
 	m_bHasExecutables = FALSE;
+	/* AURORA_RUNTIME_SAFE_BROWSER_RESET_V1_4_1 */
+	m_bSubMenu = FALSE;
 }
 
 
@@ -1026,11 +978,11 @@ static Int32 _BrowserEntryQSort(const void *pA, const void *pB)
 	if (pDirA->eType == pDirB->eType)
 	{
 		return strcasecmp(pDirA->name, pDirB->name);
-	} 
+	}
 	else
 	{
 		return pDirA->eType - pDirB->eType;
-	}	
+	}
 }
 
 void CBrowserScreen::SortEntries()
@@ -1096,6 +1048,27 @@ Bool CBrowserScreen::AddEntry(const Char *pName, BrowserEntryTypeE eType, Int32 
 
 	strncpy(m_pDirEntries[m_nEntries].name, pName, BROWSER_ENTRY_MAXCHARS - 1);
 	m_pDirEntries[m_nEntries].name[BROWSER_ENTRY_MAXCHARS-1] = '\0';
+
+	/* If the copy was truncated, the cut may land inside a multi-byte
+	   UTF-8/GBK character (the tail would render as garbage).  Back the
+	   terminator up to the last whole character boundary. */
+	if (strlen(pName) > BROWSER_ENTRY_MAXCHARS - 1)
+	{
+		Char *name = m_pDirEntries[m_nEntries].name;
+		size_t n = 0;
+		while (name[n])
+		{
+			Int32 clen = FontCharLen(name + n);
+			if (clen <= 0)
+				break;
+			if (n + (size_t)clen > BROWSER_ENTRY_MAXCHARS - 1)
+			{
+				name[n] = '\0';
+				break;
+			}
+			n += (size_t)clen;
+		}
+	}
 	m_pDirEntries[m_nEntries].size = size;
 	m_pDirEntries[m_nEntries].eType = eType;
 	m_nEntries++;
@@ -1157,7 +1130,7 @@ void CBrowserScreen::Draw()
 	/* Recompute from the selected font so a future font change cannot
 	   reintroduce the footer overlap. */
 	{
-		Int32 nAdvance = FontGetHeight() + 2;
+		Int32 nAdvance = FontGetRowAdvance();
 		if (nAdvance > 0)
 		{
 			m_MaxLines = (BROWSER_FOOTER_TOP - BROWSER_LIST_TOP) / nAdvance;
@@ -1186,8 +1159,8 @@ void CBrowserScreen::Draw()
     PolyBlend(TRUE);
 
 
-//    PolyColor4f(0.0f, 0.2f, 0.2f, 0.5f); 
-    PolyColor4f(0.0f, 0.2f, 0.2f, 0.9f); 
+//    PolyColor4f(0.0f, 0.2f, 0.2f, 0.5f);
+    PolyColor4f(0.0f, 0.2f, 0.2f, 0.9f);
 	PolyRect(0, vy, 256, 9);
 
 	FontColor4f(0.0, 0.8f, 0.8f, 1.0f);
@@ -1408,13 +1381,15 @@ void CBrowserScreen::Draw()
 			if (iEntry == m_iSelect)
 			{
 				if (iEntry == m_iSelect)
-					PolyColor4f(0.0f, 1.0f, 0.0f, 0.5f); 
+					PolyColor4f(0.0f, 1.0f, 0.0f, 0.5f);
 					else
-					PolyColor4f(0.0f, 0.0f, 0.0f, 0.25f); 
+					PolyColor4f(0.0f, 0.0f, 0.0f, 0.25f);
 
 				Int32 selW = FontGetStrWidth(str);
 				if (selW > nameMaxPx) selW = nameMaxPx;
-				PolyRect(vx-1, vy-1, selW + 2, FontGetHeight() + 2);
+				/* vy-2..vy+15: fully covers the 12px CJK glyphs (drawn from
+				   vy-2) with the 17px row pitch (see FontGetRowAdvance). */
+				PolyRect(vx-1, vy-2, selW + 2, FontGetRowAdvance());
 //				PolyRect(vx-2, vy-0, strlen(str) * 12 + 2, 13 + 0);
 			}
 
@@ -1441,7 +1416,7 @@ void CBrowserScreen::Draw()
 //			FontPuts(vx+480, vy, sizestr);
 		}
 
-		vy += FontGetHeight() + 2;
+		vy += FontGetRowAdvance();
 		iEntry++;
 	}
 
@@ -1457,7 +1432,7 @@ void CBrowserScreen::Draw()
 			if (visRows > m_MaxLines) visRows = m_MaxLines;
 			if (visRows < 1)          visRows = 1;
 			dlTop = 32.0f;                                       /* below title */
-			dlBot = 32.0f + (Float32)(visRows * (FontGetHeight() + 2));
+				dlBot = 32.0f + (Float32)(visRows * FontGetRowAdvance());
 
 			PolyTexture(NULL);
 			PolyBlend(TRUE);
@@ -1489,7 +1464,7 @@ void CBrowserScreen::Draw()
 	FontSelect(0);
 
 	/* Cover art panel (right side). A dark backing panel + the cover,
-	   or a "No Covers" placeholder when no matching PNG was found. Only
+	   or a "无封面" placeholder when no matching PNG was found. Only
 	   shown while enabled - otherwise the browser is unchanged. */
 	if (bCoverUI)
 	{
@@ -1506,7 +1481,7 @@ void CBrowserScreen::Draw()
 		}
 		else if (CoverNoImage())
 		{
-			const Char *msg = "\xe6\x97\xa0\xe5\xb0\x81\xe9\x9d\xa2";  /* 无封面 */
+			const Char *msg = "无封面";
 			FontColor4f(0.55f, 0.55f, 0.55f, 1.0f);
 			FontPrintf(BROWSER_COVER_X + (BROWSER_COVER_W - FontGetStrWidth(msg)) / 2,
 			           BROWSER_COVER_Y + BROWSER_COVER_H / 2 - 6, "%s", msg);
@@ -1553,12 +1528,12 @@ void CBrowserScreen::Input(Uint32 buttons, Uint32 trigger)
 			(GetEntryPath(selectedPath, sizeof(selectedPath)) != 0 &&
 			 BrowserIsSmbPath(selectedPath)) ? TRUE : FALSE;
 
-		if (!bSmbSelection)
+		if (m_nEntries > 0 && !bSmbSelection)
 			m_bSubMenu = !m_bSubMenu;
 		  /*
 		if (m_bSubMenu)
 		{
-	    	Char str[256];
+            Char str[256];
 
 //	        sprintf(str, "%s%s", m_Dir, m_pDirEntries[m_iSelect].name);
 	        sprintf(str, "%s", m_pDirEntries[m_iSelect].name);
@@ -1583,6 +1558,19 @@ void CBrowserScreen::Input(Uint32 buttons, Uint32 trigger)
 		m_iSelect++;
 	}
 
+	/* AURORA_BROWSER_PAGE_JUMP_V1_3
+	 * Left/Right use the same page jump as Circle/Square. The existing clamp below
+	 * saturates at entry 0 and m_nEntries - 1, so these can never wrap. */
+	if (trigger & PAD_LEFT)
+	{
+		m_iSelect -= m_MaxLines-1;
+	}
+
+	if (trigger & PAD_RIGHT)
+	{
+		m_iSelect += m_MaxLines-1;
+	}
+
 	if (trigger & (PAD_SQUARE))
 	{
 		/* With covers on, Square swaps the artwork (boxart / title /
@@ -1598,9 +1586,19 @@ void CBrowserScreen::Input(Uint32 buttons, Uint32 trigger)
 		m_iSelect+= m_MaxLines-1;
 	}
 
-	// scroll
-	if (m_iSelect < 0) m_iSelect = 0;
- 	if (m_iSelect > (m_nEntries - 1)) m_iSelect = (m_nEntries - 1);
+	/* AURORA_RUNTIME_SAFE_BROWSER_EMPTY_V1_4_1
+	 * m_nEntries==0 used to make the old upper clamp assign -1, then
+	 * propagate -1 into m_iScroll. Keep both invariants non-negative. */
+	if (m_nEntries <= 0)
+	{
+		m_iSelect = 0;
+		m_iScroll = 0;
+	}
+	else
+	{
+		if (m_iSelect < 0) m_iSelect = 0;
+		if (m_iSelect >= m_nEntries) m_iSelect = m_nEntries - 1;
+	}
 
 	// scroll
 	if (m_iSelect < m_iScroll)
@@ -1613,10 +1611,16 @@ void CBrowserScreen::Input(Uint32 buttons, Uint32 trigger)
 		m_iScroll = m_iSelect - m_MaxLines + 1;
 	}
 
-	if (trigger & PAD_TRIANGLE)
+if (trigger & PAD_TRIANGLE)
+{
+    if (m_bStateManager || m_bSramManager)
     {
-        Chdir("..");
+        _MainLoopStateBrowserReturn();
+        return;
     }
+
+    Chdir("..");
+}
 
 	if (trigger & (PAD_CROSS | PAD_START))
 	{
@@ -1647,7 +1651,7 @@ void CBrowserScreen::Input(Uint32 buttons, Uint32 trigger)
 				CoverFreeCache();
 				SendMessage(1, m_pDirEntries[m_iSelect].eType, (void *)str);
 	            break;
-	            
+
 			}
 		}
 		return;
@@ -1669,6 +1673,18 @@ void CBrowserScreen::SetDir(const Char *pDir)
 {
     Char openBuf[1024];
     const Char *openPath = pDir;
+
+    /* AURORA_RUNTIME_SAFE_BROWSER_SETDIR_V1_4_2
+     * m_Dir is persistent 512-byte state. Reject, rather than truncate, a
+     * path that cannot be represented: a truncated filesystem path could
+     * point at a different entry while an overflow would corrupt the ELF. */
+    if (!pDir)
+        return;
+    if (strlen(pDir) >= sizeof(m_Dir))
+    {
+        MainLoopStatusPrintf(180, "路径过长。");
+        return;
+    }
     /* 0=nao-hdd, 1=dentro de particao (pfs0:), 2=lista de particoes, -1=falha */
     int hddKind = 0;
     int mmceUnavailable = 0;
@@ -1687,6 +1703,18 @@ void CBrowserScreen::SetDir(const Char *pDir)
 		HddLoadEmbeddedIrx();
 		hddKind = HddMapPath(pDir, openBuf, sizeof(openBuf));
 		if (hddKind == 1) openPath = openBuf;   /* "pfs0:/..." */
+	}
+
+	/* Carga PREGUICOSA do HD interno (exFAT/FAT via BDM): ao entrar em
+	   ata0:/ata1:, carrega dev9/atad_bd AGORA -- nunca no boot.  O BDM e
+	   o bdmfs_fatfs (UTF-8 LFN) ja' estao no ar do boot; o volume monta
+	   em ataN: logo apos o registro do block device.  Mutuamente exclusivo
+	   com o modo APA acima (HddLoadEmbeddedIrx devolve erro de restart se
+	   a pilha oposta ja carregou nesta sessao). */
+	if (pDir[0] == 'a' && pDir[1] == 't' && pDir[2] == 'a' &&
+	    pDir[3] >= '0' && pDir[3] <= '1')
+	{
+		AtaBdLoadEmbeddedIrx();
 	}
 
 	/* MMCE is not considered present merely because mmceman registered.
@@ -1744,93 +1772,120 @@ void CBrowserScreen::SetDir(const Char *pDir)
 		/* falha ao montar a particao -> lista vazia (sem crashar) */
 	}
 	else if (strlen(openPath) > 0)
-	{
-		int dfd = BrowserOpenDirectory(openPath);
-		if (dfd >= 0)
-		{
-			iox_dirent_t de;
-			int dreadResult;
-			while ((dreadResult = fileXioDread(dfd, &de)) > 0)
-			{
-				BrowserEntryTypeE eType;
-				BrowserEntryTypeE resolvedType;
-				Bool bIsDir;
-				Int32 nSize;
+{
+    int dfd = BrowserOpenDirectory(openPath);
 
-				/* Be defensive with third-party iomanX drivers that fill all
-				   256 bytes without writing a final NUL. */
-				de.name[sizeof(de.name) - 1] = '\0';
-				if (!de.name[0] || !strcmp(de.name, ".") || !strcmp(de.name, ".."))
-					continue;
-				if (m_bStateManager && BrowserIsSramDirectoryName(de.name))
-					continue;
-				if (BrowserIsCoverMetadataName(de.name))
-					continue;
+    if (dfd >= 0)
+    {
+        iox_dirent_t de;
+        int dreadResult;
 
-				/* Hide cover-art PNGs from the browser list - they are
-				   artwork for the cover system, not ROMs. */
-				{
-					size_t nLength = strlen(de.name);
-					if (nLength >= 4 &&
-					    strcasecmp(de.name + nLength - 4, ".png") == 0)
-						continue;
-				}
+        while ((dreadResult = fileXioDread(dfd, &de)) > 0)
+        {
+            BrowserEntryTypeE eType;
+            BrowserEntryTypeE resolvedType;
+            Bool bIsDir;
+            Int32 nSize;
 
-				resolvedType = (BrowserEntryTypeE)SendMessage(
-					2, 0, (void *)de.name);
+            /* Be defensive with third-party iomanX drivers that fill all
+               256 bytes without writing a final NUL. */
+            de.name[sizeof(de.name) - 1] = '\0';
 
-				/* Recognised ROM extensions win over the directory flag and never
-				   need a getstat/dopen fallback. This
-				   keeps compatibility with old CDVD drivers whose dread result
-				   occasionally leaked a SUBDIR bit into regular files, without
-				   paying for a stat() call per ROM. */
-				if (resolvedType == BROWSER_ENTRYTYPE_EXECUTABLE)
-				{
-					eType = BROWSER_ENTRYTYPE_EXECUTABLE;
-				}
-				else
-				{
-					bIsDir = BrowserResolveDirectory(
-						openPath, de.name, de.stat.mode);
-					if (bIsDir)
-					{
-						eType = BROWSER_ENTRYTYPE_DIR;
-					}
-					else
-					{
-					/* The dedicated manager must never invite deletion of
-					   SRAM, state.cfg, icons, or unrelated files that share
-					   mc0:/SNESticle with memory-card state banks. */
-						if (m_bStateManager &&
-						    !BrowserIsStateBankName(de.name))
-							continue;
-						eType = BROWSER_ENTRYTYPE_OTHER;
-					}
-				}
+            if (!de.name[0] ||
+                !strcmp(de.name, ".") ||
+                !strcmp(de.name, ".."))
+                continue;
 
-				/* BrowserEntryT keeps a legacy signed 32-bit display size. The
-				   size column is disabled, but clamp instead of wrapping huge
-				   files negative. */
-				if (de.stat.hisize != 0 || de.stat.size > (unsigned int)INT_MAX)
-					nSize = INT_MAX;
-				else
-					nSize = (Int32)de.stat.size;
+            if (m_bStateManager &&
+                BrowserIsSramDirectoryName(de.name))
+                continue;
 
-				if (!AddEntry(de.name, eType, nSize))
-					break;
-			}
-			fileXioDclose(dfd);
-			if (dreadResult < 0 && BrowserIsSmbPath(openPath))
-			{
-				SmbReportBrowseError(dreadResult);
-				MainLoopModalPrintf(60 * 2, "SMB: %s", SmbGetStatusText());
-			}
-		}
-		else if (BrowserIsSmbPath(openPath))
-		{
-			MainLoopModalPrintf(60 * 2, "SMB: %s\nCheck config/network", SmbGetStatusText());
-		}
-	} else
+            if (BrowserIsCoverMetadataName(de.name))
+                continue;
+
+            /* Hide cover-art PNGs from the browser list. */
+            {
+                size_t nLength = strlen(de.name);
+
+                if (nLength >= 4 &&
+                    strcasecmp(de.name + nLength - 4, ".png") == 0)
+                    continue;
+            }
+
+            resolvedType = (BrowserEntryTypeE)SendMessage(
+                2, 0, (void *)de.name);
+
+            if (resolvedType == BROWSER_ENTRYTYPE_EXECUTABLE)
+            {
+                eType = BROWSER_ENTRYTYPE_EXECUTABLE;
+            }
+            else
+            {
+                bIsDir = BrowserResolveDirectory(
+                    openPath,
+                    de.name,
+                    de.stat.mode
+                );
+
+                if (bIsDir)
+                {
+                    eType = BROWSER_ENTRYTYPE_DIR;
+                }
+                else
+                {
+                    if (m_bStateManager)
+                    {
+                        if (!BrowserIsStateBankName(de.name))
+                            continue;
+                    }
+                    else if (m_bSramManager)
+                    {
+                        if (!BrowserIsSramFileName(de.name))
+                            continue;
+                    }
+
+                    eType = BROWSER_ENTRYTYPE_OTHER;
+                }
+            }
+
+            /* BrowserEntryT keeps a legacy signed 32-bit display size. */
+            if (de.stat.hisize != 0 ||
+                de.stat.size > (unsigned int)INT_MAX)
+            {
+                nSize = INT_MAX;
+            }
+            else
+            {
+                nSize = (Int32)de.stat.size;
+            }
+
+            if (!AddEntry(de.name, eType, nSize))
+                break;
+        }
+
+        fileXioDclose(dfd);
+
+        if (dreadResult < 0 &&
+            BrowserIsSmbPath(openPath))
+        {
+            SmbReportBrowseError(dreadResult);
+            MainLoopModalPrintf(
+                60 * 2,
+                "SMB: %s",
+                SmbGetStatusText()
+            );
+        }
+    }
+    else if (BrowserIsSmbPath(openPath))
+    {
+        MainLoopModalPrintf(
+            60 * 2,
+            "SMB: %s\n请检查配置/网络",
+            SmbGetStatusText()
+        );
+    }
+}
+else
 	{
         AddEntry("cdfs:", BROWSER_ENTRYTYPE_DRIVE, 0);
 //        AddEntry("cdrom:", BROWSER_ENTRYTYPE_DRIVE, 0);
@@ -1839,36 +1894,25 @@ void CBrowserScreen::SetDir(const Char *pDir)
            smb: is a real iomanX filesystem and is mounted only on selection. */
         if (SmbSupportIsEnabled())
             AddEntry("smb:", BROWSER_ENTRYTYPE_DRIVE, 0);
-        /* USB/HD via BDM: cada pendrive, HD externo USB e -- QUANDO o toggle
-           "ATA HDD (FAT/exFAT)" esta' LIGADO no Video Config -- o HD INTERNO
-           formatado em FAT/exFAT/MBR/GPT (via driver ATA-Assault:
-           usbhdfsd.irx embarcado) aparecem como unidades massN:.  A ordem
-           depende da deteccao (USB primeiro, ATA por ultimo = mass2 ou
-           mass3 se dois USBs tambem estiverem conectados); listamos as 2
-           primeiras pois elas cobrem USB em 99% dos casos, e qualquer
-           unidade adicional abre sem conteudo se a deteccao nao a achou.
-
-           NOTA: o HD interno APA (hdd0:/pfs0:) usa OUTRO toggle proprio
-           ("HDD Support (APA)") e tem sua propria entrada "hdd0:" abaixo.
-           Os dois modos de uso do HD interno sao mutuamente exclusivos
-           (ambos controlam o mesmo barramento ATA do DEV9). */
+        /* USB/HD via BDM: cada pendrive, HD externo USB e o HD INTERNO
+           (FAT/exFAT, via ata_bd) viram uma unidade massN:.  A ordem
+           depende da deteccao, entao listamos algumas; as vazias so'
+           abrem sem conteudo. */
         if (MassStorageIsEnabled())
         {
             AddEntry("mass0:", BROWSER_ENTRYTYPE_DRIVE, 0);
             AddEntry("mass1:", BROWSER_ENTRYTYPE_DRIVE, 0);
-            /* Quando o ATA BDM Assault esta' ativo, o HD interno aparece
-               como uma unidade mass adicional.  Em setup padrao (0 USBs
-               conectados) ele cai em mass0 ou mass1; se 2 USBs + 1 ATA
-               estiverem presentes, o ATA sera' o mass2, entao listamos
-               mais uma entrada para cobrir esse caso comum. */
-            if (AtaBdmAssaultIsEnabled())
-                AddEntry("mass2:", BROWSER_ENTRYTYPE_DRIVE, 0);
         }
         /* HD interno (APA): so' listado se o usuario LIGOU o suporte a HDD
            nas configs.  A carga dos modulos (dev9/atad/hdd) e' preguicosa,
            feita em SetDir() ao entrar -- nunca no boot. */
         if (HddSupportIsEnabled())
             AddEntry("hdd0:", BROWSER_ENTRYTYPE_DRIVE, 0);
+        /* HD interno (exFAT/FAT via BDM, atad_bd): mutuamente exclusivo com o
+           modo APA acima (o toggle de config garante que so' um aparece).
+           Carga preguicosa em SetDir() ao entrar em ata0:. */
+        if (AtaBdSupportIsEnabled())
+            AddEntry("ata0:", BROWSER_ENTRYTYPE_DRIVE, 0);
         /* A registered mmceman driver is not proof of hardware.  PING both
            physical ports and list only devices that actually answered. */
         if (MmceSupportIsEnabled())

@@ -1,0 +1,2895 @@
+/***********************************************************************************
+  Snes9x - Portable Super Nintendo Entertainment System (TM) emulator.
+
+  (c) Copyright 1996 - 2002  Gary Henderson (gary.henderson@ntlworld.com),
+                             Jerremy Koot (jkoot@snes9x.com)
+
+  (c) Copyright 2002 - 2004  Matthew Kendora
+
+  (c) Copyright 2002 - 2005  Peter Bortas (peter@bortas.org)
+
+  (c) Copyright 2004 - 2005  Joel Yliluoma (http://iki.fi/bisqwit/)
+
+  (c) Copyright 2001 - 2006  John Weidman (jweidman@slip.net)
+
+  (c) Copyright 2002 - 2006  funkyass (funkyass@spam.shaw.ca),
+                             Kris Bleakley (codeviolation@hotmail.com)
+
+  (c) Copyright 2002 - 2010  Brad Jorsch (anomie@users.sourceforge.net),
+                             Nach (n-a-c-h@users.sourceforge.net),
+                             zones (kasumitokoduck@yahoo.com)
+
+  (c) Copyright 2006 - 2007  nitsuja
+
+  (c) Copyright 2009 - 2010  BearOso,
+                             OV2
+
+
+  BS-X C emulator code
+  (c) Copyright 2005 - 2006  Dreamer Nom,
+                             zones
+
+  C4 x86 assembler and some C emulation code
+  (c) Copyright 2000 - 2003  _Demo_ (_demo_@zsnes.com),
+                             Nach,
+                             zsKnight (zsknight@zsnes.com)
+
+  C4 C++ code
+  (c) Copyright 2003 - 2006  Brad Jorsch,
+                             Nach
+
+  DSP-1 emulator code
+  (c) Copyright 1998 - 2006  _Demo_,
+                             Andreas Naive (andreasnaive@gmail.com),
+                             Gary Henderson,
+                             Ivar (ivar@snes9x.com),
+                             John Weidman,
+                             Kris Bleakley,
+                             Matthew Kendora,
+                             Nach,
+                             neviksti (neviksti@hotmail.com)
+
+  DSP-2 emulator code
+  (c) Copyright 2003         John Weidman,
+                             Kris Bleakley,
+                             Lord Nightmare (lord_nightmare@users.sourceforge.net),
+                             Matthew Kendora,
+                             neviksti
+
+  DSP-3 emulator code
+  (c) Copyright 2003 - 2006  John Weidman,
+                             Kris Bleakley,
+                             Lancer,
+                             z80 gaiden
+
+  DSP-4 emulator code
+  (c) Copyright 2004 - 2006  Dreamer Nom,
+                             John Weidman,
+                             Kris Bleakley,
+                             Nach,
+                             z80 gaiden
+
+  OBC1 emulator code
+  (c) Copyright 2001 - 2004  zsKnight,
+                             pagefault (pagefault@zsnes.com),
+                             Kris Bleakley
+                             Ported from x86 assembler to C by sanmaiwashi
+
+  SPC7110 and RTC C++ emulator code used in 1.39-1.51
+  (c) Copyright 2002         Matthew Kendora with research by
+                             zsKnight,
+                             John Weidman,
+                             Dark Force
+
+  SPC7110 and RTC C++ emulator code used in 1.52+
+  (c) Copyright 2009         byuu,
+                             neviksti
+
+  S-DD1 C emulator code
+  (c) Copyright 2003         Brad Jorsch with research by
+                             Andreas Naive,
+                             John Weidman
+
+  S-RTC C emulator code
+  (c) Copyright 2001 - 2006  byuu,
+                             John Weidman
+
+  ST010 C++ emulator code
+  (c) Copyright 2003         Feather,
+                             John Weidman,
+                             Kris Bleakley,
+                             Matthew Kendora
+
+  Super FX x86 assembler emulator code
+  (c) Copyright 1998 - 2003  _Demo_,
+                             pagefault,
+                             zsKnight
+
+  Super FX C emulator code
+  (c) Copyright 1997 - 1999  Ivar,
+                             Gary Henderson,
+                             John Weidman
+
+  Sound emulator code used in 1.5-1.51
+  (c) Copyright 1998 - 2003  Brad Martin
+  (c) Copyright 1998 - 2006  Charles Bilyue'
+
+  Sound emulator code used in 1.52+
+  (c) Copyright 2004 - 2007  Shay Green (gblargg@gmail.com)
+
+  SH assembler code partly based on x86 assembler code
+  (c) Copyright 2002 - 2004  Marcus Comstedt (marcus@mc.pp.se)
+
+  2xSaI filter
+  (c) Copyright 1999 - 2001  Derek Liauw Kie Fa
+
+  HQ2x, HQ3x, HQ4x filters
+  (c) Copyright 2003         Maxim Stepin (maxim@hiend3d.com)
+
+  NTSC filter
+  (c) Copyright 2006 - 2007  Shay Green
+
+  GTK+ GUI code
+  (c) Copyright 2004 - 2010  BearOso
+
+  Win32 GUI code
+  (c) Copyright 2003 - 2006  blip,
+                             funkyass,
+                             Matthew Kendora,
+                             Nach,
+                             nitsuja
+  (c) Copyright 2009 - 2010  OV2
+
+  Mac OS GUI code
+  (c) Copyright 1998 - 2001  John Stiles
+  (c) Copyright 2001 - 2010  zones
+
+  (c) Copyright 2010 - 2016 Daniel De Matteis. (UNDER NO CIRCUMSTANCE 
+  WILL COMMERCIAL RIGHTS EVER BE APPROPRIATED TO ANY PARTY)
+
+  Specific ports contains the works of other authors. See headers in
+  individual files.
+
+
+  Snes9x homepage: http://www.snes9x.com/
+
+  Permission to use, copy, modify and/or distribute Snes9x in both binary
+  and source form, for non-commercial purposes, is hereby granted without
+  fee, providing that this license information and copyright notice appear
+  with all copies and any derived work.
+
+  This software is provided 'as-is', without any express or implied
+  warranty. In no event shall the authors be held liable for any damages
+  arising from the use of this software or it's derivatives.
+
+  Snes9x is freeware for PERSONAL USE only. Commercial users should
+  seek permission of the copyright holders first. Commercial use includes,
+  but is not limited to, charging money for Snes9x or software derived from
+  Snes9x, including Snes9x or derivatives in commercial game bundles, and/or
+  using Snes9x as a promotion for your commercial product.
+
+  The copyright holders request that bug fixes and improvements to the code
+  should be forwarded to them so everyone can benefit from the modifications
+  in future versions.
+
+  Super NES and Super Nintendo Entertainment System are trademarks of
+  Nintendo Co., Limited and its subsidiary companies.
+ ***********************************************************************************/
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <string.h>
+#include <ctype.h>
+
+#include <libretro.h>
+#include <vfs/vfs.h>
+#include <streams/file_stream.h>
+#include <vfs/vfs_hybrid.h>
+#ifndef PS2
+#include "libretro_core_options.h"
+#endif
+#include "hdpack.h"
+
+#ifdef _3DS
+void* linearMemAlign(size_t size, size_t alignment);
+void linearFree(void* mem);
+#endif
+
+#include "../src/apu.h"
+#include "../src/cheats.h"
+#include "../src/controls.h"
+#include "../src/cpuexec.h"
+#include "../src/display.h"
+#include "../src/fxemu.h"
+#include "../src/memmap.h"
+#include "../src/bsx.h"
+#include "../src/bsflash.h"
+#include "../src/messages.h"
+#include "../src/ppu.h"
+#include "../src/snapshot.h"
+#include "../src/snes9x.h"
+#include "../src/msu1.h"
+#include "../src/srtc.h"
+#include "../filter/snes_ntsc.h"
+
+#define LR_MAP_BUTTON(id, name)		S9xMapButton((id), S9xGetCommandT((name)))
+#define MAKE_BUTTON(pad, btn)			(((pad) << 4) | (btn))
+
+#define BTN_POINTER		(RETRO_DEVICE_ID_JOYPAD_R + 1)
+#define BTN_POINTER2		(BTN_POINTER + 1)
+
+#define RETRO_DEVICE_JOYPAD_MULTITAP		RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 0)
+
+/* Subsystem id for the Satellaview (BS-X base cart + memory pack) pairing. */
+#define RETRO_GAME_TYPE_BSX			0x0101
+#define RETRO_GAME_TYPE_SUFAMI_TURBO		0x0102
+#define RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE		RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_LIGHTGUN, 0)
+#define RETRO_DEVICE_LIGHTGUN_JUSTIFIER		RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_LIGHTGUN, 1)
+#define RETRO_DEVICE_LIGHTGUN_JUSTIFIERS		RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_LIGHTGUN, 2)
+
+#define CORE_VERSION	"1.52.4"
+#define LIBRETRO_LIB_NAME "Snes9x 2010"
+
+#define VIDEO_REFRESH_RATE_PAL  (PAL_MASTER_CLOCK / (SNES_CYCLES_PER_SCANLINE * SNES_MAX_PAL_VCOUNTER))
+#define VIDEO_REFRESH_RATE_NTSC (NTSC_MASTER_CLOCK / (SNES_CYCLES_PER_SCANLINE * SNES_MAX_NTSC_VCOUNTER))
+
+/* Backing buffer for the in-memory STREAM abstraction (see snes9x.h).
+ * Upstream libretro-common dropped memstream_set_buffer/get_last_size and
+ * now requires the buffer at memstream_open() time, so we publish it here
+ * for the OPEN_STREAM() macro to pick up. */
+uint8_t *s9x_stream_buffer      = NULL;
+uint64_t s9x_stream_buffer_size = 0;
+
+void S9xSetStreamBuffer(uint8_t *buffer, uint64_t size)
+{
+	s9x_stream_buffer      = buffer;
+	s9x_stream_buffer_size = size;
+}
+
+/* Set when the frontend has signalled RETRO_AV_ENABLE_HARD_DISABLE_AUDIO,
+   i.e. "you may skip audio work entirely this frame". That also sets
+   Settings.HardDisableAudio, so dsp_run() returns at its head, the DSP cursor
+   never advances and S9xDrainAudio reports no samples at all. Nothing is
+   uploaded, and nothing needs to be: libretro.h defines the flag as a promise
+   that the frontend will never need this audio, and RetroArch only raises it
+   around runahead's discarded frames, where it has suspended its own
+   consumption for the same frames - audio_driver_sample_batch() returns on the
+   suspended flag before it reads anything the core hands over. The ring drains
+   during runahead whatever the core does, because it is the frontend that
+   stopped consuming.
+
+   Deliberately NOT keyed off a clear RETRO_AV_ENABLE_AUDIO. That bit only
+   means "the frontend will discard these samples"; the frontend keeps the
+   resulting core state. Preemptive Frames (runahead without a second
+   instance) replays frames with audio suspended but hard-disable clear, and
+   the state left behind by those replays is the state the emulation carries
+   forward. Skipping audio generation there freezes every audio-side cursor -
+   the MSU-1 play offset above all - while the CPU/APU advance, so the MSU-1
+   stream falls a replay window behind on each rollback and, under continuous
+   input, stops progressing altogether. Suspension must cost output, never
+   state. */
+static bool audio_hard_disabled;
+
+/* MSU-1 Enhanced Audio: when enabled AND an MSU1 cart is loaded, the whole
+   output pipeline runs at 44.1 kHz (the SPC's ~32040 Hz output is resampled up
+   and the MSU1 stream mixes in at its native rate, avoiding the intermediate
+   downsample).
+
+   `msu1_enhanced_pref` is the user's option, which check_variables() may
+   rewrite at any point during a run. `msu1_enhanced_latched` is the copy the
+   audio path runs on, taken once at content load, immediately before the
+   frontend queries retro_get_system_av_info(). The two have to be separate:
+   the rate is reported once and cannot be renegotiated afterwards without
+   SET_SYSTEM_AV_INFO, which is only legal from inside retro_run() and tears
+   down the frontend's audio and video drivers to service. Latching keeps the
+   reported rate and the emitted rate in agreement for the whole lifetime of
+   the loaded content, and makes the option's "takes effect on next content
+   load" description true instead of aspirational. The active rate is only
+   raised when MSU1 is actually present. */
+/* AURORA_SNES9X2010_V3_MENU_BRIDGE_20260824
+ * Typed standalone-host settings. No RetroArch strings or per-frame option
+ * registry are needed on PS2. Values mirror Aurora's existing six-page UI. */
+static uint32_t aurora_forced_sram_bytes = 0;
+static uint32_t aurora_detected_sram_mask = 0;
+static uint8_t aurora_force_region = 0;
+static uint8_t aurora_layer_mask = 0x1f;
+static uint8_t aurora_hack_flags = 0;
+static uint8_t aurora_obj_limit_level = 0;
+static uint8_t aurora_obj_limit_mode = 0;
+static uint32_t aurora_frame_phase = 0;
+
+static void S9xAuroraApplySramOverride(void)
+{
+    if (!Memory.SRAM)
+        return;
+    Memory.SRAMMask = aurora_forced_sram_bytes
+        ? aurora_forced_sram_bytes - 1
+        : aurora_detected_sram_mask;
+}
+
+void S9xAuroraSetMenuOptions(uint32_t sram_kbits, int force_region,
+                             unsigned layer_mask, unsigned hack_flags,
+                             unsigned obj_level, unsigned obj_mode)
+{
+    uint8_t old_hack_flags = aurora_hack_flags;
+    uint8_t old_obj_level = aurora_obj_limit_level;
+    uint8_t old_obj_mode = aurora_obj_limit_mode;
+
+    if (sram_kbits >= 8 && sram_kbits <= 2048 &&
+        (sram_kbits & (sram_kbits - 1)) == 0)
+        aurora_forced_sram_bytes = sram_kbits << 7;
+    else
+        aurora_forced_sram_bytes = 0;
+
+    aurora_force_region =
+        (force_region >= 0 && force_region <= 3) ? (uint8_t)force_region : 0;
+    aurora_layer_mask = (uint8_t)(layer_mask & 0x1fU);
+    aurora_hack_flags = (uint8_t)(hack_flags & 0x0fU);
+    aurora_obj_limit_level = obj_level < 7 ? (uint8_t)obj_level : 0;
+    aurora_obj_limit_mode = obj_mode < 2 ? (uint8_t)obj_mode : 0;
+    if ((old_hack_flags ^ aurora_hack_flags) & 0x02U)
+        PPU.RecomputeClipWindows = TRUE;
+    if (old_obj_level != aurora_obj_limit_level ||
+        old_obj_mode != aurora_obj_limit_mode)
+        IPPU.OBJChanged = TRUE;
+    S9xAuroraApplySramOverride();
+}
+
+uint8_t S9xAuroraLayerMask(void) { return aurora_layer_mask; }
+uint8_t S9xAuroraHackFlags(void) { return aurora_hack_flags; }
+int S9xAuroraMode7Half(void) { return (aurora_hack_flags & 0x04U) != 0; }
+uint32_t S9xAuroraFramePhase(void) { return aurora_frame_phase; }
+
+int S9xAuroraObjTileBudget(void)
+{
+    static const uint8_t budget[7] = { 34, 28, 24, 20, 16, 12, 8 };
+    return aurora_obj_limit_mode == 0 ? budget[aurora_obj_limit_level] : 34;
+}
+
+int S9xAuroraObjScreenBudget(void)
+{
+    static const uint8_t budget[7] = { 128, 28, 24, 20, 16, 12, 8 };
+    return aurora_obj_limit_mode == 1 ? budget[aurora_obj_limit_level] : 128;
+}
+
+#ifdef PS2
+/* AURORA_SNES9X2010_V2_PS2LEAN_20260824: MSU-1/audio-rate sidecar pipeline is not part of Aurora PS2. */
+#define MSU1_ENHANCED_RATE 44100
+static bool msu1_enhanced_active(void) { return false; }
+static void msu1_latch_playback_rate(void) {}
+#else
+#define MSU1_ENHANCED_RATE 44100
+static bool msu1_enhanced_pref    = true;
+static bool msu1_enhanced_latched = false;
+
+/* True while the enhanced-audio streaming upsampler holds valid in-flight
+   state (frame pair + phase). Cleared whenever the enhanced path is not the
+   one feeding the frontend, so state never leaks across mode changes. */
+static bool msu1_enh_running = false;
+
+/* True when 44.1 kHz output is actually in effect (option on AND MSU1 active). */
+static bool msu1_enhanced_active(void)
+{
+	return msu1_enhanced_latched && Settings.MSU1;
+}
+
+/* Take the option's value for this content. Called at the tail of the load
+   path, after check_variables() has read the option and before the frontend
+   asks for av_info. */
+static void msu1_latch_playback_rate(void)
+{
+	msu1_enhanced_latched = msu1_enhanced_pref;
+	msu1_enh_running      = false;
+}
+#endif
+
+enum
+{
+	ASPECT_RATIO_4_3,
+	ASPECT_RATIO_1_1,
+	ASPECT_RATIO_NTSC,
+	ASPECT_RATIO_PAL,
+	ASPECT_RATIO_AUTO
+};
+
+static retro_log_printf_t		log_cb = NULL;
+static retro_video_refresh_t		video_cb = NULL;
+static retro_input_poll_t			poll_cb = NULL;
+static retro_input_state_t		input_cb = NULL;
+static retro_audio_sample_batch_t			audio_batch_cb = NULL;
+static retro_environment_t		environ_cb = NULL;
+
+static unsigned frameskip_type = 0;
+static unsigned frameskip_threshold = 0;
+static uint16_t frameskip_counter = 0;
+static bool retro_audio_buff_active = false;
+static unsigned retro_audio_buff_occupancy = 0;
+static bool retro_audio_buff_underrun = false;
+
+/* Maximum number of consecutive frames that can be skipped */
+#define FRAMESKIP_MAX 30
+
+static unsigned retro_audio_latency = 0;
+static bool update_audio_latency = false;
+
+extern s9xcommand_t keymap[1024];
+bool overclock_cycles = false;
+extern int fx_cycle_accuracy; /* fxemu.c SuperFX cycle-cost toggle */
+extern int fx_hw_timing;      /* fxemu.c hardware-derived GSU timing toggle */
+extern uint32_t SuperFXHwTimingPct;
+bool reduce_sprite_flicker = false;
+bool pseudo_hires_blend = false;
+extern uint16_t joypad[8];
+int one_c, slow_one_c, two_c;
+
+static struct
+{
+	int16_t retro_mouse_state[2][2];
+	int16_t retro_justifier_state[2][2];
+	int16_t retro_scope_state[2];
+} input_vars;
+
+static uint8_t aspect_ratio_mode = ASPECT_RATIO_4_3;
+static bool libretro_supports_option_categories = false;
+static bool libretro_supports_bitmasks = false;
+static bool libretro_supports_sw_fb = false;
+static bool libretro_sw_fb_checked = false;
+
+/* Direct-render state for the sw_fb optimization. When sw_fb_active is
+   true for the current frame, GFX.Screen has been redirected to point at
+   a frontend-supplied software framebuffer. The renderer writes pixels
+   there directly, and S9xDeinitUpdate hands fb.data to video_cb instead
+   of GFX.Screen. The acquire happens at the cpuexec.c hook (after this
+   frame's resolution is known); abort happens at the ppu.c promotion
+   sites if a mid-frame mode change forces a wider/taller buffer.
+   Saved fields hold the originals for the abort/release-after-frame
+   restoration. */
+static bool      sw_fb_active        = false;
+static void     *sw_fb_data          = NULL;
+static unsigned  sw_fb_width         = 0;
+static unsigned  sw_fb_height        = 0;
+static size_t    sw_fb_pitch         = 0;
+static uint16_t   *sw_fb_saved_screen  = NULL;
+static int       sw_fb_saved_pitch   = 0;
+
+/* Persistent buffer pointers. GFX.Screen is allowed to be temporarily
+   overwritten by the sw_fb redirect and various swap paths; we always
+   know the buffer the core actually owns by keeping a separate copy
+   here, untouched after retro_init. retro_deinit frees these directly
+   instead of GFX.Screen so the wrong pointer can't be freed even if
+   some abnormal teardown path leaves the redirect state inconsistent. */
+static void *owned_screen_buffer  = NULL;
+static void *owned_ntsc_buffer    = NULL;
+static uint32_t retro_devices[2];
+
+/* AURORA_SNES9X2010_V1_RUNTIMEFIX_20260824 -- embedded-init status for Aurora. */
+static bool aurora_embedded_init_ok = false;
+bool AuroraS9x2010InitOK(void)
+{
+	return aurora_embedded_init_ok;
+}
+
+/* filter */
+static int snes_ntsc_filter = 0;
+#ifndef PS2
+static snes_ntsc_t snes_ntsc;
+static snes_ntsc_setup_t ntsc_setup;
+#endif
+static uint16_t *ntsc_screen_buffer = NULL;
+/* AURORA_SNES9X2010_V1_PS2LEAN_20260824: snes_ntsc_t is 262144 x 32-bit entries (~1 MiB)
+ * and used to live in libretro.o even when Blargg was disabled. */
+/* Buffer width must fit both NTSC filter output (~604 px after
+   rounding to a 4-pixel multiple) and the 4x Mode 7 hires renderer
+   (1024 px). The buffer is sized to the max of these. Frames that
+   don't use 4x hires write only the leftmost N px and the trailing
+   columns are unused garbage. */
+#define MAX_SNES_WIDTH_NTSC ((SNES_NTSC_OUT_WIDTH(256) + 3) / 4 * 4)
+#define MAX_SNES_WIDTH_4X   1024
+/* AURORA_SNES9X2010_V1_RUNTIMEFIX_20260824: Aurora PS2 presents at most native/hires 512. */
+#ifdef PS2
+#define MAX_BUFFER_WIDTH    512
+#else
+#define MAX_BUFFER_WIDTH    (MAX_SNES_WIDTH_4X > MAX_SNES_WIDTH_NTSC ? MAX_SNES_WIDTH_4X : MAX_SNES_WIDTH_NTSC)
+#endif
+
+static void update_geometry();
+
+static void retro_audio_buff_status_cb(bool active, unsigned occupancy, bool underrun_likely)
+{
+	retro_audio_buff_active = active;
+	retro_audio_buff_occupancy = occupancy;
+	retro_audio_buff_underrun = underrun_likely;
+}
+
+static void retro_set_audio_buff_status_cb(void) {
+	if (frameskip_type > 0)
+	{
+		struct retro_audio_buffer_status_callback buf_status_cb;
+		buf_status_cb.callback = retro_audio_buff_status_cb;
+
+		if (!environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK, &buf_status_cb))
+		{
+			if (log_cb)
+				log_cb(RETRO_LOG_WARN, "Frameskip disabled - frontend does not support audio buffer status monitoring.\n");
+
+			retro_audio_buff_active = false;
+			retro_audio_buff_occupancy = 0;
+			retro_audio_buff_underrun = false;
+			retro_audio_latency = 0;
+		}
+		else
+		{
+			/* Frameskip is enabled - increase frontend audio latency to
+			 * minimise potential buffer underruns */
+			uint32_t frame_time_usec = Settings.FrameTimeNTSC;
+
+			if (Settings.PAL)
+				frame_time_usec = Settings.FrameTimePAL;
+
+			/* Set latency to 6x current frame time... */
+			retro_audio_latency = (unsigned)(6 * frame_time_usec / 1000);
+
+			/* ...then round up to nearest multiple of 32 */
+			retro_audio_latency = (retro_audio_latency + 0x1F) & ~0x1F;
+		}
+	}
+	else
+	{
+		environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK, NULL);
+		retro_audio_latency = 0;
+	}
+
+	update_audio_latency = true;
+}
+
+#ifdef PS2
+/* AURORA_SNES9X2010_V2_PS2LEAN_20260824
+ * Aurora owns the settings UI. Do not parse RetroArch string variables at
+ * content load or poll for changes each frame; initialise exactly the V1
+ * defaults the bridge previously returned through GET_VARIABLE. */
+static void check_variables(bool first_run)
+{
+    (void)first_run;
+    Settings.ForceNTSC = (aurora_force_region == 1 || aurora_force_region == 2);
+    Settings.ForcePAL = (aurora_force_region == 3);
+    dsp_interp_mode = DSP_INTERP_GAUSSIAN;
+    frameskip_type = 0;
+    frameskip_threshold = 33;
+    aspect_ratio_mode = ASPECT_RATIO_AUTO;
+    overclock_cycles = false;
+    one_c = 6; slow_one_c = 8; two_c = 12;
+    Settings.SuperFXSpeedPerLine = 6255000u; /* V1 option: 10 MHz */
+    SuperFXHwTimingPct = 100;
+    fx_hw_timing = 0;
+    fx_cycle_accuracy = 1;
+    reduce_sprite_flicker = false;
+    Settings.Mode7Hires = 0;
+    Settings.Mode7HiresVertical = 0;
+    Settings.Mode7HiresBilinear = 1;
+    pseudo_hires_blend = false;
+    Settings.BlockInvalidVRAMAccessMaster = TRUE;
+    Settings.MSU1 = FALSE;
+    snes_ntsc_filter = 0;
+    retro_audio_latency = 0;
+    update_audio_latency = false;
+}
+#else
+static void check_variables(bool first_run)
+{
+	bool reset_sfx = false;
+#ifndef PS2
+	int old_filter = snes_ntsc_filter;
+#endif
+	struct retro_variable var;
+	bool prev_force_ntsc;
+	bool prev_force_pal;
+	bool prev_frameskip_type;
+
+	var.key = "snes9x_2010_region";
+	var.value = NULL;
+
+	prev_force_ntsc = Settings.ForceNTSC;
+	prev_force_pal = Settings.ForcePAL;
+
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		if (strcmp(var.value, "auto") == 0)
+		{
+			Settings.ForceNTSC = false;
+			Settings.ForcePAL = false;
+		}
+		else if (strcmp(var.value, "ntsc") == 0)
+		{
+			Settings.ForceNTSC = true;
+			Settings.ForcePAL = false;
+			Settings.PAL = FALSE;
+		}
+		else if (strcmp(var.value, "pal") == 0)
+		{
+			Settings.ForceNTSC = false;
+			Settings.ForcePAL = true;
+			Settings.PAL = TRUE;
+		}
+	}
+
+	var.key = "snes9x_2010_audio_interpolation";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		if (strcmp(var.value, "cubic") == 0)
+			dsp_interp_mode = DSP_INTERP_CUBIC;
+		else if (strcmp(var.value, "sinc") == 0)
+			dsp_interp_mode = DSP_INTERP_SINC;
+		else
+			dsp_interp_mode = DSP_INTERP_GAUSSIAN;
+	}
+	else
+		dsp_interp_mode = DSP_INTERP_GAUSSIAN;
+
+	var.key = "snes9x_2010_msu1_enhanced_audio";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+		msu1_enhanced_pref = (strcmp(var.value, "enabled") == 0);
+	else
+		msu1_enhanced_pref = true;
+
+	var.key = "snes9x_2010_frameskip";
+	var.value = NULL;
+
+	prev_frameskip_type = frameskip_type;
+	frameskip_type = 0;
+
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		if (strcmp(var.value, "auto") == 0)
+			frameskip_type = 1;
+		else if (strcmp(var.value, "manual") == 0)
+			frameskip_type = 2;
+	}
+
+	var.key = "snes9x_2010_frameskip_threshold";
+	var.value = NULL;
+
+	frameskip_threshold = 33;
+
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+		frameskip_threshold = strtol(var.value, NULL, 10);
+
+	var.key = "snes9x_2010_aspect";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		uint8_t newval = ASPECT_RATIO_AUTO;
+
+		if (strcmp(var.value, "ntsc") == 0)
+			newval = ASPECT_RATIO_NTSC;
+		else if (strcmp(var.value, "pal") == 0)
+			newval = ASPECT_RATIO_PAL;
+		else if (strcmp(var.value, "4:3") == 0)
+			newval = ASPECT_RATIO_4_3;
+		else if (strcmp(var.value, "uncorrected") == 0)
+			newval = ASPECT_RATIO_1_1;
+
+		if (newval != aspect_ratio_mode)
+			aspect_ratio_mode = newval;
+	}
+
+	var.key = "snes9x_2010_overclock";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		char *endptr;
+		long freq = strtol(var.value, &endptr, 10);
+
+		/* There must be a space between the value and the unit. Therefore, we
+		 * check that the character after the converted integer is a space. */
+		if (*endptr != ' ' || freq == 0)
+		{
+			S9xMessage(S9X_MSG_WARN, S9X_CATEGORY_EXTERNAL, "Unable to obtain SuperFX overclock setting.");
+			freq = 10;
+		}
+
+		/* 0.417 * 1.5e6 == 625500 GSU cycles/second per MHz (the option list
+		 * is integer MHz only). Computed in integer math: the SNES has no FPU
+		 * and this value feeds the per-line instruction budget, so it must be
+		 * bit-identical across platforms for deterministic SuperFX execution. */
+		Settings.SuperFXSpeedPerLine = 625500u * (uint32_t)freq;
+		/* The hardware timing mode scales its flat 1364-cycle line budget
+		   from the same option: 10 MHz (the default) == 100%. */
+		SuperFXHwTimingPct = (uint32_t) freq * 10;
+		reset_sfx = true;
+	}
+
+	var.key = "snes9x_2010_superfx_timing";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		int newval = (!strcmp(var.value, "hardware")) ? 1 : 0;
+		if (newval != fx_hw_timing)
+		{
+			fx_hw_timing = newval;
+			reset_sfx = true;
+		}
+	}
+
+	var.key = "snes9x_2010_superfx_cycle_accuracy";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		int newval = (!strcmp(var.value, "enabled")) ? 1 : 0;
+		if (newval != fx_cycle_accuracy)
+		{
+			fx_cycle_accuracy = newval;
+			reset_sfx = true;
+		}
+	}
+
+	var.key = "snes9x_2010_overclock_cycles";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		if (strcmp(var.value, "compatible") == 0)
+		{
+			overclock_cycles = true;
+			one_c = 4;
+			slow_one_c = 5;
+			two_c = 6;
+		}
+		else if (strcmp(var.value, "max") == 0)
+		{
+			overclock_cycles = true;
+			one_c = 3;
+			slow_one_c = 3;
+			two_c = 3;
+		}
+		else if (strcmp(var.value, "light") == 0)
+		{
+			overclock_cycles = true;
+			one_c = 6;
+			slow_one_c = 6;
+			two_c = 12;
+		}
+		else
+			overclock_cycles = false;
+	}
+
+#ifndef PS2
+	var.key = "snes9x_2010_blargg";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		if (strcmp(var.value, "disabled") == 0)
+			snes_ntsc_filter = 0;
+		else
+		{
+			if (strcmp(var.value, "monochrome") == 0)
+			{
+				snes_ntsc_filter = 1;
+				ntsc_setup = snes_ntsc_monochrome;
+			}
+			else if (strcmp(var.value, "rf") == 0)
+			{
+				snes_ntsc_filter = 2;
+				ntsc_setup = snes_ntsc_composite;
+				ntsc_setup.merge_fields = 0;
+			}
+			else if (strcmp(var.value, "composite") == 0)
+			{
+				snes_ntsc_filter = 3;
+				ntsc_setup = snes_ntsc_composite;
+			}
+			else if (strcmp(var.value, "s-video") == 0)
+			{
+				snes_ntsc_filter = 4;
+				ntsc_setup = snes_ntsc_svideo;
+			}
+			else if (strcmp(var.value, "rgb") == 0)
+			{
+				snes_ntsc_filter = 5;
+				ntsc_setup = snes_ntsc_rgb;
+			}
+		}
+	}
+
+#else
+	/* AURORA_SNES9X2010_V1_PS2LEAN_20260824: Blargg is not built on PS2. */
+	snes_ntsc_filter = 0;
+#endif
+
+	var.key = "snes9x_2010_reduce_sprite_flicker";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		if (strcmp(var.value, "enabled") == 0)
+			reduce_sprite_flicker = true;
+		else
+			reduce_sprite_flicker = false;
+	}
+
+	var.key = "snes9x_2010_mode7_hires";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		/* Order matters: the *_hv suffixes must be checked before the
+		 * unsuffixed forms so that strcmp("4x_hv", "4x") doesn't match
+		 * the wrong branch via strncmp logic if the parsing ever
+		 * changes. We use full strcmp here so it's not actually a hazard
+		 * today, but the order also makes the intent clear. */
+		if (strcmp(var.value, "4x_hv") == 0)
+		{
+			Settings.Mode7Hires = 4;
+			Settings.Mode7HiresVertical = 1;
+		}
+		else if (strcmp(var.value, "2x_hv") == 0)
+		{
+			Settings.Mode7Hires = 2;
+			Settings.Mode7HiresVertical = 1;
+		}
+		else if (strcmp(var.value, "4x") == 0)
+		{
+			Settings.Mode7Hires = 4;
+			Settings.Mode7HiresVertical = 0;
+		}
+		else if (strcmp(var.value, "2x") == 0 || strcmp(var.value, "enabled") == 0)
+		{
+			Settings.Mode7Hires = 2;
+			Settings.Mode7HiresVertical = 0;
+		}
+		else
+		{
+			Settings.Mode7Hires = 0;
+			Settings.Mode7HiresVertical = 0;
+		}
+	}
+
+	var.key = "snes9x_2010_mode7_hires_bilinear";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		if (strcmp(var.value, "smooth") == 0)
+			Settings.Mode7HiresBilinear = 2;
+		else if (strcmp(var.value, "stable") == 0 || strcmp(var.value, "enabled") == 0)
+			Settings.Mode7HiresBilinear = 1;
+		else
+			Settings.Mode7HiresBilinear = 0;
+	}
+
+	var.key = "snes9x_2010_pseudo_hires_blend";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+	{
+		if (strcmp(var.value, "enabled") == 0)
+			pseudo_hires_blend = true;
+		else
+			pseudo_hires_blend = false;
+	}
+	/* Reinitialise frameskipping, if required */
+	if (!first_run &&
+	    ((frameskip_type     != prev_frameskip_type) ||
+	     (Settings.ForceNTSC != prev_force_ntsc)     ||
+	     (Settings.ForcePAL  != prev_force_pal)))
+      retro_set_audio_buff_status_cb();
+
+/*  */
+#ifndef PS2
+	if (old_filter != snes_ntsc_filter)
+		snes_ntsc_init(&snes_ntsc, &ntsc_setup);
+#endif
+
+	if (reset_sfx)
+		S9xResetSuperFX();
+}
+
+#endif
+
+void *retro_get_memory_data(unsigned type)
+{
+	uint8_t *data;
+
+	switch (type)
+	{
+		case RETRO_MEMORY_SAVE_RAM:
+			data = Memory.SRAM;
+		break;
+		case RETRO_MEMORY_RTC:
+			data = RTCData.reg;
+		break;
+		case RETRO_MEMORY_SYSTEM_RAM:
+			data = Memory.RAM;
+		break;
+		case RETRO_MEMORY_VIDEO_RAM:
+			data = Memory.VRAM;
+		break;
+/*		case RETRO_MEMORY_ROM:
+			data = Memory.ROM;
+		break;		*/
+		default:
+			data = NULL;
+		break;
+	}
+
+	return data;
+}
+
+size_t retro_get_memory_size(unsigned type)
+{
+	unsigned size;
+
+	switch (type)
+	{
+		case RETRO_MEMORY_SAVE_RAM:
+            if (aurora_forced_sram_bytes)
+                size = (unsigned)aurora_forced_sram_bytes;
+            else
+            {
+                size = (unsigned)(Memory.SRAMSize
+                    ? (1 << (Memory.SRAMSize + 3)) * 128 : 0);
+                /* AURORA_SNES9X2010_V6_CD_SRAM_NOTICES_20260824: matching native SNESticle's 256 KiB limit keeps
+                 * raw .srm files interchangeable in both directions. */
+                if (size > 0x40000)
+                    size = 0x40000;
+            }
+            break;
+		case RETRO_MEMORY_RTC:
+			size = (Settings.SRTC || Settings.SPC7110RTC) ? 20 : 0;
+		break;
+		case RETRO_MEMORY_SYSTEM_RAM:
+			size = 128 * 1024;
+		break;
+		case RETRO_MEMORY_VIDEO_RAM:
+			size = 64 * 1024;
+		break;
+/*		case RETRO_MEMORY_ROM:
+			data = Memory.CalculatedSize;
+		break;		*/
+		default:
+			size = 0;
+		break;
+	}
+
+	return size;
+}
+
+unsigned retro_api_version(void) { return RETRO_API_VERSION; }
+
+void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
+void retro_set_audio_sample(retro_audio_sample_t cb) { (void) cb; }
+void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { audio_batch_cb = cb; }
+void retro_set_input_poll(retro_input_poll_t cb) { poll_cb = cb; }
+void retro_set_input_state(retro_input_state_t cb) { input_cb = cb; }
+
+#ifdef PS2
+void retro_set_environment(retro_environment_t cb)
+{
+    /* AURORA_SNES9X2010_V2_PS2LEAN_20260824: no RetroArch option/controller/subsystem registry. */
+    environ_cb = cb;
+    libretro_supports_option_categories = false;
+}
+#else
+void retro_set_environment(retro_environment_t cb)
+{
+        bool local_bool_val = false;
+	static const struct retro_controller_description port_1[] = {
+		{ "SNES Joypad", RETRO_DEVICE_JOYPAD },
+		{ "SNES Mouse", RETRO_DEVICE_MOUSE },
+		{ "RetroPad", RETRO_DEVICE_JOYPAD },
+	};
+
+	static const struct retro_controller_description port_2[] = {
+		{ "SNES Joypad", RETRO_DEVICE_JOYPAD },
+		{ "SNES Mouse", RETRO_DEVICE_MOUSE },
+		{ "Multitap", RETRO_DEVICE_JOYPAD_MULTITAP },
+		{ "SuperScope", RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE },
+		{ "Justifier", RETRO_DEVICE_LIGHTGUN_JUSTIFIER },
+		{ "Justifiers", RETRO_DEVICE_LIGHTGUN_JUSTIFIERS },
+		{ "RetroPad", RETRO_DEVICE_JOYPAD },
+	};
+
+	static const struct retro_controller_info ports[] = {
+		{ port_1, 3 },
+		{ port_2, 7 },
+		{ 0, 0 }
+	};
+
+	environ_cb = cb;
+
+	libretro_supports_option_categories = false;
+#ifndef PS2
+	libretro_set_core_options(environ_cb, &local_bool_val);
+        libretro_supports_option_categories = local_bool_val;
+#else
+	/* AURORA_SNES9X2010_V1_PS2LEAN_20260824: no RetroArch core-options registry in standalone Aurora. */
+	(void)local_bool_val;
+#endif
+
+	/* (No option-visibility callback: the bilinear and hires options
+	   are now independent and both are always shown.) */
+
+	environ_cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void*)ports);
+
+	/* Satellaview subsystem: a BS-X base cartridge (Slot A) paired with a
+	   swappable BS Memory pack (Slot B), matching the two-slot model used by
+	   mainline snes9x and bsnes-plus. The single-ROM heuristic path (which
+	   auto-detects dumped BS games and the BS-X BIOS by header) is retained,
+	   so this subsystem is an additional, explicit way to pair a base cart
+	   with a specific memory-pack dump. */
+	{
+		static const struct retro_subsystem_rom_info bsx_roms[] = {
+			{ "BS-X Base Cartridge", "bsx|sfc|smc|bin", false, false, true, NULL, 0 },
+			{ "BS Memory Pack",      "bs|sfc|smc|bin",  false, false, false, NULL, 0 },
+		};
+		static const struct retro_subsystem_rom_info st_roms[] = {
+			{ "Sufami Turbo Cartridge (Slot 1)", "st|sfc|smc|bin", false, false, true,  NULL, 0 },
+			{ "Sufami Turbo Cartridge (Slot 2)", "st|sfc|smc|bin", false, false, false, NULL, 0 },
+		};
+		static const struct retro_subsystem_info subsystems[] = {
+			{ "Satellaview (BS-X + Memory Pack)", "bsx", bsx_roms, 2, RETRO_GAME_TYPE_BSX },
+			{ "Sufami Turbo",                     "st",  st_roms,  2, RETRO_GAME_TYPE_SUFAMI_TURBO },
+			{ NULL, NULL, NULL, 0, 0 },
+		};
+		environ_cb(RETRO_ENVIRONMENT_SET_SUBSYSTEM_INFO, (void*)subsystems);
+	}
+
+#if !defined(STATIC_LINKING) && !defined(PS2)
+	/* Dynamic libretro frontends may provide a VFS. Standalone Aurora does not. */
+	vfs_hybrid_init(environ_cb, NULL);
+#endif
+}
+
+#endif
+
+void retro_get_system_info(struct retro_system_info *info)
+{
+	info->need_fullpath    = false;
+	info->valid_extensions = "smc|fig|sfc|gd3|gd7|dx2|bsx|swc";
+#ifdef GIT_VERSION
+	info->library_version = CORE_VERSION GIT_VERSION;
+#else
+	info->library_version  = CORE_VERSION;
+#endif
+	info->library_name     = LIBRETRO_LIB_NAME;
+	info->block_extract    = false;
+}
+
+/* Drain one frame of audio from the SPC and hand it to the frontend in a
+ * single audio_batch_cb call. Zero-copy: S9xDrainAudio returns a pointer
+ * directly into the SPC's landing_buffer, which RetroArch reads
+ * synchronously inside audio_batch_cb.
+ *
+ * libretro pulls audio exactly once per retro_run via the batch callback.
+ * The mid-frame "samples available" hook (S9xSetSamplesAvailableCallback)
+ * that upstream Snes9x exposes for SDL-style frontends is not wired here;
+ * samples accumulate in landing_buffer across the whole frame and ship in
+ * one batch when the frame ends.
+ *
+ * Sizing: ~534 stereo frames per NTSC frame, ~641 per PAL, plus up to
+ * 1.6% more on speedup-hack carts (the SPC produces samples at
+ * TEMPO_UNIT / timing_hack_denominator times its normal rate and we
+ * report that higher rate to the frontend - see S9xGetAudioSampleRate).
+ *
+ * On mute, send silence at the same cadence to keep the frontend's
+ * audio clock fed. Skipping the call would let RetroArch's audio ring
+ * drain and pull DRC out of its steady-state tracking. */
+#ifdef PS2
+static void audio_upload_samples(void)
+{
+    int n;
+    const int16_t *src = S9xDrainAudio(&n);
+    if (n <= 0 || audio_hard_disabled)
+        return;
+    audio_batch_cb(src, (size_t)n >> 1);
+}
+#else
+static void audio_upload_samples(void)
+{
+	int n;
+	const int16_t *src = S9xDrainAudio(&n);
+	if (n <= 0)
+		return;
+
+	if (audio_hard_disabled || !msu1_enhanced_active())
+		msu1_enh_running = false;
+
+	/* Nothing to upload: see audio_hard_disabled. In practice this is
+	   unreachable - dsp_run() has already declined to produce anything, so the
+	   drain above reported zero and returned - but the flag is the contract and
+	   the check is where the contract belongs. */
+	if (audio_hard_disabled)
+		return;
+
+	/* MSU-1 Enhanced Audio path: run the whole frame at 44.1 kHz. The SPC's
+	   ~32040 Hz output is linearly upsampled to 44.1 kHz, then the MSU1 stream
+	   mixes in at its native rate (no downsample), and the 44.1 kHz result
+	   ships to the frontend. Only taken when an MSU1 cart is loaded and the
+	   option is on; every other game skips this entirely. */
+	if (msu1_enhanced_active())
+	{
+		/* Staging size, not a worst case: the loop below runs one pass per
+		   chunk until the input batch is consumed, so no frame count has to
+		   fit here. That matters because the batch is not bounded by the
+		   per-frame sample count - S9xDrainAudio hands over whatever the DSP
+		   accumulated, up to the full landing buffer, which the 44100/32040
+		   ratio turns into far more output frames than one chunk holds. Long
+		   frames are real: the DSP's own overflow clamp cites Top Gear 3000
+		   emitting ~2600 stereo samples in a single frame. The old fixed cap
+		   discarded every input frame past the first 1024 output frames, and
+		   discarded them permanently - it is heard as breakup, not latency. */
+		#define MSU1_ENH_CHUNK 1024
+		static int16_t enh_buffer[MSU1_ENH_CHUNK * 2];
+		/* Streaming upsampler state, persistent across batches: the frame
+		   pair being interpolated and the 16.16 phase between them. The old
+		   fixed-count loop restarted the phase at 0 every batch, truncated
+		   away the fractional output frame (a steady ~0.1% deficit against
+		   the rate reported to the frontend, parking DRC off-centre), and
+		   flattened the interpolation at the batch tail (l1 = l0 hold).
+		   Driving the loop by source consumption instead makes the seam
+		   exact and the long-run output count converge to
+		   in_frames * out_rate / in_rate with no truncation loss.
+
+		   The pair, the phase and the fill count live in struct MSU1 so
+		   snapshot.c carries them (v9); they are emulation-timeline state,
+		   not scratch, and Preemptive Frames rolls the timeline back. */
+		int16_t  enh_cur_l = (int16_t) MSU1.MSU1_EnhCurL;
+		int16_t  enh_cur_r = (int16_t) MSU1.MSU1_EnhCurR;
+		int16_t  enh_nxt_l = (int16_t) MSU1.MSU1_EnhNxtL;
+		int16_t  enh_nxt_r = (int16_t) MSU1.MSU1_EnhNxtR;
+		uint64_t enh_frac  = MSU1.MSU1_EnhFrac;
+		int      enh_fill  = (int) MSU1.MSU1_EnhFill;
+
+		int   in_frames  = n >> 1;
+		int   in_pos     = 0;
+		uint32_t in_rate  = S9xGetAudioSampleRate();
+		uint32_t out_rate = (uint32_t) ((double) MSU1_ENHANCED_RATE
+			* (double) in_rate / 32040.0);
+		/* 32.32 step through the SPC (source) stream per output frame;
+		   always < 1.0 here (upsampling), so each output shifts in at most
+		   one source frame. 32 fractional bits keep the long-run output
+		   count exact against the rate reported to the frontend (16.16
+		   truncation alone leaves a ~18 ppm surplus). */
+		uint64_t step = ((uint64_t) in_rate << 32) / out_rate;
+
+		if (!msu1_enh_running)
+		{
+			enh_frac = 0;
+			enh_fill = 0;
+			msu1_enh_running = true;
+		}
+
+		/* A zero step would leave the phase standing still: the emit loop
+		   would fill a chunk without consuming a source frame and the outer
+		   loop would never terminate. out_rate is in_rate scaled by
+		   44100/32040 so this is unreachable, but the termination argument
+		   rests on it, so bail rather than trust the arithmetic. */
+		if (!step)
+		{
+			msu1_enh_running = false;
+			return;
+		}
+
+		/* One pass per output chunk. The upsampler state carries across
+		   passes exactly as it carries across batches, so a chunk boundary is
+		   indistinguishable from a batch boundary and no source frame is
+		   dropped at either. */
+		for (;;)
+		{
+			int out_frames = 0;
+
+			/* (Re)fill the frame pair from this batch. */
+			while (enh_fill < 2 && in_pos < in_frames)
+			{
+				if (enh_fill == 0)
+				{
+					enh_cur_l = src[in_pos * 2 + 0];
+					enh_cur_r = src[in_pos * 2 + 1];
+				}
+				else
+				{
+					enh_nxt_l = src[in_pos * 2 + 0];
+					enh_nxt_r = src[in_pos * 2 + 1];
+				}
+				enh_fill++;
+				in_pos++;
+			}
+
+			/* Short of a frame pair; the rest arrives with the next batch. */
+			if (enh_fill < 2)
+				break;
+
+			while (enh_fill == 2 && out_frames < MSU1_ENH_CHUNK)
+			{
+				/* 64-bit product: |nxt - cur| * t can reach 65535 * 65535,
+				   overflowing int32 (signed UB) on full-scale transients. */
+				uint32_t t = (uint32_t) (enh_frac >> 16) & 0xffff;
+				enh_buffer[out_frames * 2 + 0] = (int16_t) (enh_cur_l +
+					(int32_t) (((int64_t) (enh_nxt_l - enh_cur_l) * (int32_t) t) >> 16));
+				enh_buffer[out_frames * 2 + 1] = (int16_t) (enh_cur_r +
+					(int32_t) (((int64_t) (enh_nxt_r - enh_cur_r) * (int32_t) t) >> 16));
+				out_frames++;
+
+				enh_frac += step;
+				while (enh_frac >= ((uint64_t) 1 << 32))
+				{
+					enh_frac -= (uint64_t) 1 << 32;
+					enh_cur_l = enh_nxt_l;
+					enh_cur_r = enh_nxt_r;
+					if (in_pos < in_frames)
+					{
+						enh_nxt_l = src[in_pos * 2 + 0];
+						enh_nxt_r = src[in_pos * 2 + 1];
+						in_pos++;
+					}
+					else
+					{
+						/* Batch exhausted; nxt refills next batch. */
+						enh_fill = 1;
+						break;
+					}
+				}
+			}
+
+			/* Mix MSU1 at the 44.1 kHz output rate (native: step == 1.0). */
+			if (out_frames > 0)
+			{
+				if (MSU1.MSU1_AudioPlay)
+					S9xMSU1Mix(enh_buffer, (size_t) out_frames, out_rate);
+				audio_batch_cb(enh_buffer, (size_t) out_frames);
+			}
+
+			/* Input exhausted; anything else is a full chunk with more
+			   behind it. */
+			if (enh_fill < 2)
+				break;
+		}
+
+		MSU1.MSU1_EnhCurL = enh_cur_l;
+		MSU1.MSU1_EnhCurR = enh_cur_r;
+		MSU1.MSU1_EnhNxtL = enh_nxt_l;
+		MSU1.MSU1_EnhNxtR = enh_nxt_r;
+		MSU1.MSU1_EnhFrac = enh_frac;
+		MSU1.MSU1_EnhFill = (uint8_t) enh_fill;
+		return;
+	}
+
+	/* MSU1 audio mix (normal ~32040 Hz path). S9xDrainAudio hands back a
+	   pointer into landing_buffer, which is a plain static array - the const on
+	   the return type says the DSP owns the cursor, not that the samples are
+	   immutable. The DSP does not run again until the next retro_run and
+	   audio_batch_cb consumes synchronously, so the mix happens in place and the
+	   same pointer ships straight to the frontend.
+
+	   This used to stage through a 768-frame scratch copy and clamp the batch to
+	   fit it, silently dropping every frame past the clamp - the same defect the
+	   enhanced path had, on the path every MSU-1 game takes by default. Neither
+	   the clamp nor the copy was ever needed. No-op for non-MSU1 carts and when
+	   nothing is playing. */
+	if (Settings.MSU1 && MSU1.MSU1_AudioPlay)
+		S9xMSU1Mix((int16_t *) src, (size_t) n >> 1, S9xGetAudioSampleRate());
+
+	audio_batch_cb(src, (size_t)n >> 1);
+}
+
+#endif
+
+void retro_set_controller_port_device(unsigned in_port, unsigned device)
+{
+	int port = in_port;
+
+	if (port >= 2)
+		return;
+
+	switch (device)
+	{
+		case RETRO_DEVICE_JOYPAD:
+			retro_devices[port] = RETRO_DEVICE_JOYPAD;
+			S9xSetController(port, CTL_JOYPAD, port, 0, 0, 0);
+		break;
+		case RETRO_DEVICE_JOYPAD_MULTITAP:
+			retro_devices[port] = RETRO_DEVICE_JOYPAD_MULTITAP;
+			S9xSetController(port, CTL_MP5, port+0, port+2, port+4, port+6);
+		break;
+		case RETRO_DEVICE_MOUSE:
+			retro_devices[port] = RETRO_DEVICE_MOUSE;
+			S9xSetController(port, CTL_MOUSE, port, 0, 0, 0);
+			/* mapping pointers here */
+			S9xMapPointer((BTN_POINTER), S9xGetCommandT("Pointer Mouse1+Superscope+Justifier1"));
+			S9xMapPointer((BTN_POINTER2), S9xGetCommandT("Pointer Mouse2"));
+			/* mapping extra buttons here */
+			LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_SELECT), "Mouse1 L");
+			LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_START), "Mouse1 R");
+			LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_SELECT), "Mouse2 L");
+			LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_START), "Mouse2 R");
+		break;
+		case RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE:
+			S9xSetController(port, CTL_SUPERSCOPE, 0, 0, 0, 0);
+			retro_devices[port] = RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE;
+			/* mapping pointers here */
+			S9xMapPointer((BTN_POINTER), S9xGetCommandT("Pointer Mouse1+Superscope+Justifier1"));
+			S9xMapPointer((BTN_POINTER2), S9xGetCommandT("Pointer Mouse2"));
+			/* mapping extra buttons here */
+			LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_SELECT), "Superscope Fire");
+			LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_START), "Superscope Cursor");
+			LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_UP), "Superscope ToggleTurbo");
+			LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_DOWN), "Superscope Pause");
+		break;
+		case RETRO_DEVICE_LIGHTGUN_JUSTIFIER:
+			S9xSetController(port, CTL_JUSTIFIER, 0, 0, 0, 0);
+			retro_devices[port] = RETRO_DEVICE_LIGHTGUN_JUSTIFIER;
+			/* mapping extra buttons here */
+			LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_SELECT), "Justifier1 Trigger");
+			LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_START), "Justifier1 Start");
+		break;
+		case RETRO_DEVICE_LIGHTGUN_JUSTIFIERS:
+			S9xSetController(port, CTL_JUSTIFIER, 1, 0, 0, 0);
+			retro_devices[port] = RETRO_DEVICE_LIGHTGUN_JUSTIFIERS;
+		break;
+		default:
+			S9xMessage(S9X_MSG_ERROR, S9X_CATEGORY_EXTERNAL, "Invalid device!");
+		break;
+	}
+
+	if (((retro_devices[0] == RETRO_DEVICE_JOYPAD) && retro_devices[1] == RETRO_DEVICE_JOYPAD) ||
+		((retro_devices[0] == RETRO_DEVICE_JOYPAD) && retro_devices[1] == RETRO_DEVICE_JOYPAD_MULTITAP) ||
+			((retro_devices[0] == RETRO_DEVICE_JOYPAD_MULTITAP) && retro_devices[1] == RETRO_DEVICE_JOYPAD))
+		Settings.NormalControls = 1;
+}
+
+static void map_buttons(void)
+{
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_A), "Joypad1 A");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_B), "Joypad1 B");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_X), "Joypad1 X");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_Y), "Joypad1 Y");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_SELECT), "Joypad1 Select");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_START), "Joypad1 Start");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_L), "Joypad1 L");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_R), "Joypad1 R");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_LEFT), "Joypad1 Left");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_RIGHT), "Joypad1 Right");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_UP), "Joypad1 Up");
+	LR_MAP_BUTTON(MAKE_BUTTON(1, RETRO_DEVICE_ID_JOYPAD_DOWN), "Joypad1 Down");
+
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_A), "Joypad2 A");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_B), "Joypad2 B");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_X), "Joypad2 X");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_Y), "Joypad2 Y");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_SELECT), "Joypad2 Select");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_START), "Joypad2 Start");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_L), "Joypad2 L");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_R), "Joypad2 R");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_LEFT), "Joypad2 Left");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_RIGHT), "Joypad2 Right");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_UP), "Joypad2 Up");
+	LR_MAP_BUTTON(MAKE_BUTTON(2, RETRO_DEVICE_ID_JOYPAD_DOWN), "Joypad2 Down");
+
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_A), "Joypad3 A");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_B), "Joypad3 B");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_X), "Joypad3 X");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_Y), "Joypad3 Y");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_SELECT), "Joypad3 Select");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_START), "Joypad3 Start");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_L), "Joypad3 L");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_R), "Joypad3 R");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_LEFT), "Joypad3 Left");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_RIGHT), "Joypad3 Right");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_UP), "Joypad3 Up");
+	LR_MAP_BUTTON(MAKE_BUTTON(3, RETRO_DEVICE_ID_JOYPAD_DOWN), "Joypad3 Down");
+
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_A), "Joypad4 A");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_B), "Joypad4 B");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_X), "Joypad4 X");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_Y), "Joypad4 Y");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_SELECT), "Joypad4 Select");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_START), "Joypad4 Start");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_L), "Joypad4 L");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_R), "Joypad4 R");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_LEFT), "Joypad4 Left");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_RIGHT), "Joypad4 Right");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_UP), "Joypad4 Up");
+	LR_MAP_BUTTON(MAKE_BUTTON(4, RETRO_DEVICE_ID_JOYPAD_DOWN), "Joypad4 Down");
+
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_A), "Joypad5 A");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_B), "Joypad5 B");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_X), "Joypad5 X");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_Y), "Joypad5 Y");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_SELECT), "Joypad5 Select");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_START), "Joypad5 Start");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_L), "Joypad5 L");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_R), "Joypad5 R");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_LEFT), "Joypad5 Left");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_RIGHT), "Joypad5 Right");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_UP), "Joypad5 Up");
+	LR_MAP_BUTTON(MAKE_BUTTON(5, RETRO_DEVICE_ID_JOYPAD_DOWN), "Joypad5 Down");
+}
+
+static float get_aspect_ratio(unsigned width, unsigned height)
+{
+	/* Pixel aspect ratio = sample_freq / 2 / dot_rate, with
+	   dot_rate = master_clock / 4. That reduces to an exact ratio of
+	   integers, so it is evaluated in 64-bit integer math and only
+	   converted to float (the geometry field's type) at the boundary:
+	     aspect = width * 2 * sf_num / (height * sf_den * master_clock)
+	   NTSC sample frequency is 135000000/11 Hz, PAL is 14750000 Hz.
+	   OV2: not sure if these really make sense - NTSC is similar to
+	   4:3, PAL looks weird. */
+	int64_t sf_num, sf_den, master_clock, num, den;
+
+	if (aspect_ratio_mode == ASPECT_RATIO_4_3)
+		return (4.0f / 3.0f);
+	else if (aspect_ratio_mode == ASPECT_RATIO_1_1)
+		return (float)width / (float)height;
+
+	if (aspect_ratio_mode == ASPECT_RATIO_NTSC) /* ntsc */
+	{
+		sf_num       = 135000000;
+		sf_den       = 11;
+		master_clock = (int64_t)NTSC_MASTER_CLOCK;
+	}
+	else if (aspect_ratio_mode == ASPECT_RATIO_PAL) /* pal */
+	{
+		sf_num       = 14750000;
+		sf_den       = 1;
+		master_clock = (int64_t)PAL_MASTER_CLOCK;
+	}
+	else /* auto: sample rate follows region, dot clock follows Settings.PAL */
+	{
+		if (retro_get_region() == RETRO_REGION_NTSC)
+		{
+			sf_num = 135000000;
+			sf_den = 11;
+		}
+		else
+		{
+			sf_num = 14750000;
+			sf_den = 1;
+		}
+		master_clock = Settings.PAL ? (int64_t)PAL_MASTER_CLOCK : (int64_t)NTSC_MASTER_CLOCK;
+	}
+
+	num = (int64_t)width  * 2 * sf_num;
+	den = (int64_t)height * sf_den * master_clock;
+
+	return (float)num / (float)den;
+}
+
+static void update_geometry(void)
+{
+	struct retro_system_av_info av_info;
+	retro_get_system_av_info(&av_info);
+	environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &av_info);
+}
+
+void retro_get_system_av_info(struct retro_system_av_info *info)
+{
+	unsigned width  = SNES_WIDTH;
+	unsigned height = PPU.ScreenHeight;
+
+	info->geometry.base_width   = width;
+	info->geometry.base_height  = height;
+	info->geometry.max_width    = MAX_BUFFER_WIDTH;
+	info->geometry.max_height   = MAX_SNES_HEIGHT;
+	if (S9xHdPackActive())
+	{
+		uint32_t hd_scale = S9xHdPackScale();
+		info->geometry.base_width  *= hd_scale;
+		info->geometry.base_height *= hd_scale;
+		info->geometry.max_width   *= hd_scale;
+		info->geometry.max_height  *= hd_scale;
+	}
+	info->geometry.aspect_ratio = get_aspect_ratio(width, height);
+
+	/* The SPC's effective output rate is its native 32040 Hz for ordinary
+	   carts and ~32550 Hz (or similar) for carts that use the APU speedup
+	   hack (~70 game IDs handled in memmap.c). Reporting the effective
+	   rate here lets the frontend's resampler handle conversion to the
+	   host audio rate.
+
+	   MSU-1 Enhanced Audio: only when an MSU1 cart is actually loaded and the
+	   option is on do we raise the whole pipeline to 44.1 kHz (scaled by the
+	   same APU speedup factor). For every non-MSU1 game this is untouched. */
+	if (msu1_enhanced_active())
+		info->timing.sample_rate = (double) MSU1_ENHANCED_RATE
+			* (double) S9xGetAudioSampleRate() / 32040.0;
+	else
+		info->timing.sample_rate = S9xGetAudioSampleRate();
+	info->timing.fps            = (retro_get_region() == RETRO_REGION_NTSC) ?
+			VIDEO_REFRESH_RATE_NTSC : VIDEO_REFRESH_RATE_PAL;
+}
+
+static void set_system_specs(void)
+{
+	unsigned level = 7;
+	environ_cb(RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL, &level);
+}
+
+void retro_init(void)
+{
+	struct retro_log_callback log;
+#ifndef PS2
+	struct retro_variable var;
+#endif
+	enum retro_pixel_format rgb565;
+	bool achievements = true;
+
+	aurora_embedded_init_ok = false;
+
+	if (environ_cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log))
+		log_cb = log.log;
+	else
+		log_cb = NULL;
+
+#ifndef PS2
+	/* State that the core supports achievements. */
+	environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, &achievements);
+#else
+	(void)achievements;
+#endif
+
+	rgb565 = RETRO_PIXEL_FORMAT_RGB565;
+	if (environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &rgb565))
+		S9xMessage(S9X_MSG_INFO, S9X_CATEGORY_EXTERNAL, "Frontend supports RGB565 - will use that instead of XRGB1555.");
+
+#ifdef PS2
+	/* Aurora's bridge implements RETRO_DEVICE_ID_JOYPAD_MASK directly. */
+	libretro_supports_bitmasks = true;
+#else
+	if (environ_cb(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS, NULL))
+		libretro_supports_bitmasks = true;
+#endif
+
+	memset(&input_vars, 0, sizeof(input_vars));
+	memset(&Settings, 0, sizeof(Settings));
+
+	Settings.SpeedhackGameID = SPEEDHACK_NONE;
+	Settings.FrameTimePAL = 20000;
+	Settings.FrameTimeNTSC = 16667;
+	Settings.HDMATimingHack = 100;
+	Settings.CartAName[0] = 0;
+	Settings.CartBName[0] = 0;
+	Settings.Crosshair = 1;
+	Settings.BlockInvalidVRAMAccessMaster = TRUE;
+#ifndef PS2
+	var.key = "snes9x_2010_block_invalid_vram_access";
+	var.value = NULL;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+		Settings.BlockInvalidVRAMAccessMaster = (strcmp(var.value, "disabled") == 0) ? FALSE : TRUE;
+#endif
+
+	CPU.Flags = 0;
+
+	if (!Init() || !S9xInitAPU())
+	{
+		Deinit();
+		S9xMessage(S9X_MSG_ERROR, S9X_CATEGORY_EXTERNAL, "Failed to init Memory or APU.");
+#ifdef PS2
+		/* AURORA_SNES9X2010_V1_RUNTIMEFIX_20260824 -- never let an embedded core exit. */
+		return;
+#else
+		exit(1);
+#endif
+	}
+
+	S9xInitSound();
+
+	/* AURORA_SNES9X2010_V6_2_STABLEINIT_20260824
+	 * Keep upstream's proven ordering: renderer/tile caches are complete before
+	 * LoadROM performs the cartridge reset. Idle frontend reservations are
+	 * reclaimed by Aurora instead of splitting this core lifecycle. */
+	GFX.Pitch = MAX_BUFFER_WIDTH * sizeof(uint16_t);
+
+	/* Defensive teardown: if retro_init is re-entered without an
+	   intervening retro_deinit (statically linked frontends, console
+	   re-init paths), the screen allocations below would orphan the
+	   prior buffers. Free via the canonical owned_* handles so we
+	   release the original allocations even if a sw_fb redirect had
+	   rewritten GFX.Screen to the frontend's swapchain. */
+#if defined(_3DS)
+	if (owned_screen_buffer)
+		linearFree(owned_screen_buffer);
+	if (owned_ntsc_buffer)
+		linearFree(owned_ntsc_buffer);
+#else
+	if (owned_screen_buffer)
+		free(owned_screen_buffer);
+	if (owned_ntsc_buffer)
+		free(owned_ntsc_buffer);
+#endif
+	owned_screen_buffer = NULL;
+	owned_ntsc_buffer   = NULL;
+	GFX.Screen          = NULL;
+	ntsc_screen_buffer  = NULL;
+
+#if defined(PS2)
+	/* AURORA_SNES9X2010_V1_RUNTIMEFIX_20260824
+	 * V1 never enables the Blargg NTSC filter. */
+	GFX.Screen = (uint16_t *)calloc(1, GFX.Pitch * 512);
+	ntsc_screen_buffer = NULL;
+#elif defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 200112L) && !defined(GEKKO) && !defined(_3DS) && !defined(__SWITCH__) && !defined(VITA)
+	/* GFX.Pitch is already in bytes (= MAX_BUFFER_WIDTH * sizeof(uint16_t));
+	   buffer size is Pitch * lines, not Pitch * lines * sizeof(uint16_t) again.
+	   request 128-bit alignment here if possible.
+	   posix_memalign output goes through void* temporaries to avoid the
+	   strict-aliasing violation that '(void**)&GFX.Screen' would create. */
+	{
+		void *tmp_screen = NULL;
+		void *tmp_ntsc   = NULL;
+		if (posix_memalign(&tmp_screen, 16, GFX.Pitch * 512) != 0)
+			tmp_screen = NULL;
+		if (posix_memalign(&tmp_ntsc, 16, GFX.Pitch * MAX_SNES_HEIGHT) != 0)
+			tmp_ntsc = NULL;
+		GFX.Screen         = (uint16_t *)tmp_screen;
+		ntsc_screen_buffer = (uint16_t *)tmp_ntsc;
+	}
+#elif defined(_3DS)
+	GFX.Screen = (uint16_t*) linearMemAlign(GFX.Pitch * 512, 0x80);
+	ntsc_screen_buffer = (uint16_t*)linearMemAlign(GFX.Pitch * MAX_SNES_HEIGHT, 0x80);
+#else
+	GFX.Screen = (uint16_t*) calloc(1, GFX.Pitch * 512);
+	ntsc_screen_buffer = (uint16_t *)calloc(1, GFX.Pitch * MAX_SNES_HEIGHT);
+#endif
+#ifdef PS2
+	if (!GFX.Screen)
+	{
+		if (log_cb) log_cb(RETRO_LOG_ERROR, "Failed to allocate PS2 screen buffer.\n");
+		Deinit();
+		return;
+	}
+#else
+	if ((!GFX.Screen || !ntsc_screen_buffer) && log_cb)
+		log_cb(RETRO_LOG_ERROR, "Failed to allocate screen buffers.\n");
+#endif
+
+	/* Stash the canonical pointers so retro_deinit always frees what we
+	   allocated, even if the sw_fb redirect leaves GFX.Screen pointing
+	   at the frontend's swapchain at teardown time. */
+	owned_screen_buffer = GFX.Screen;
+	owned_ntsc_buffer   = ntsc_screen_buffer;
+#ifdef PS2
+	if (!S9xGraphicsInit())
+	{
+		printf("[S9X2010][PS2] S9xGraphicsInit OOM; aborting core init safely\n");
+		if (owned_screen_buffer) free(owned_screen_buffer);
+		if (owned_ntsc_buffer) free(owned_ntsc_buffer);
+		owned_screen_buffer = NULL;
+		owned_ntsc_buffer = NULL;
+		GFX.Screen = NULL;
+		ntsc_screen_buffer = NULL;
+		Deinit();
+		return;
+	}
+#else
+	S9xGraphicsInit();
+#endif
+
+	retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
+	retro_set_controller_port_device(1, RETRO_DEVICE_JOYPAD);
+
+	S9xUnmapAllControls();
+	map_buttons();
+
+	/* Initialize SuperFX CPU to normal speed by default.
+	 * 0.417 * 10.5e6 == 4378500 exactly; kept as an integer so the
+	 * GSU instruction budget stays FPU-free and deterministic. */
+	Settings.SuperFXSpeedPerLine = 4378500;
+	aurora_embedded_init_ok = true;
+}
+
+/* libretro uses relative values for analogue devices. 
+   S9x seems to use absolute values, but do convert these into relative values in the core. (Why?!)
+   Hack around it. :) */
+
+void retro_deinit(void)
+{
+	aurora_embedded_init_ok = false;
+	S9xHdPackDeinit();
+
+	/* If the user closes content with pause-on-menu disabled, retro_deinit
+	   can fire while a frame is mid-render and GFX.Screen still points at
+	   the frontend's swapchain buffer. Restore for tidiness, but the
+	   actual robustness comes from freeing owned_screen_buffer below
+	   instead of GFX.Screen. */
+	if (sw_fb_saved_screen)
+	{
+		GFX.Screen   = sw_fb_saved_screen;
+		GFX.Pitch    = sw_fb_saved_pitch;
+		sw_fb_saved_screen = NULL;
+		sw_fb_active = false;
+	}
+
+	Deinit();
+	S9xGraphicsDeinit();
+	S9xUnmapAllControls();
+#if defined(_3DS)
+	if (owned_screen_buffer)
+		linearFree(owned_screen_buffer);
+	if (owned_ntsc_buffer)
+		linearFree(owned_ntsc_buffer);
+#else
+	free(owned_screen_buffer);
+	free(owned_ntsc_buffer);
+#endif
+	owned_screen_buffer = NULL;
+	owned_ntsc_buffer   = NULL;
+	GFX.Screen          = NULL;
+	ntsc_screen_buffer  = NULL;
+
+	/* Reset globals (required for static builds) */
+	libretro_supports_option_categories = false;
+	libretro_supports_bitmasks = false;
+	libretro_supports_sw_fb    = false;
+	libretro_sw_fb_checked     = false;
+	frameskip_type             = 0;
+	frameskip_threshold        = 0;
+	frameskip_counter          = 0;
+	retro_audio_buff_active    = false;
+	retro_audio_buff_occupancy = 0;
+	retro_audio_buff_underrun  = false;
+	retro_audio_latency        = 0;
+	update_audio_latency       = false;
+}
+
+void retro_reset (void)
+{
+	S9xSoftReset();
+}
+
+uint16_t snes_lut[] = {
+	SNES_B_MASK,		/* 32768 */
+	SNES_Y_MASK,		/* 16384 */
+	SNES_SELECT_MASK,	/* 8192 */
+	SNES_START_MASK,	/* 4096 */
+	SNES_UP_MASK,		/* 2048 */
+	SNES_DOWN_MASK,		/* 1024 */
+	SNES_LEFT_MASK,		/* 512 */
+	SNES_RIGHT_MASK,	/* 256 */
+	SNES_A_MASK,		/* 128 */
+	SNES_X_MASK,		/* 64 */
+	SNES_TL_MASK,		/* 32 */
+	SNES_TR_MASK		/* 16 */
+};
+
+
+static void report_buttons(void)
+{
+	uint32_t i, port;
+	int16_t ret;
+
+	for (port = 0; port < 2; port++)
+	{
+		ret = 0;
+		switch (retro_devices[port])
+		{
+			case RETRO_DEVICE_JOYPAD:
+			{
+				bool pressed;
+				uint16_t button_press;
+
+				if (libretro_supports_bitmasks)
+					ret = input_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK);
+				else
+				{
+					for (i = RETRO_DEVICE_ID_JOYPAD_B; i <= RETRO_DEVICE_ID_JOYPAD_R; i++)
+						if (input_cb(port, RETRO_DEVICE_JOYPAD, 0, i))
+							ret |= (1 << i);
+				}
+
+				for (i = RETRO_DEVICE_ID_JOYPAD_B; i <= RETRO_DEVICE_ID_JOYPAD_R; i++)
+				{
+					pressed = ret & (1 << i);
+					button_press = snes_lut[i];
+
+					if (pressed)
+						joypad[port] |= button_press;
+					else
+						joypad[port] &= ~button_press;
+				}
+			}
+			break;
+			case RETRO_DEVICE_JOYPAD_MULTITAP:
+			{
+				uint32_t j;
+				for (j = 0; j < 4; j++)
+				{
+					unsigned new_port = Settings.CurrentROMisMultitapCompatible ? (port + j) : (port);
+					if (libretro_supports_bitmasks)
+						ret = input_cb(new_port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK);
+					else
+					{
+						for (i = RETRO_DEVICE_ID_JOYPAD_B; i <= RETRO_DEVICE_ID_JOYPAD_R; i++)
+							if (input_cb(new_port, RETRO_DEVICE_JOYPAD, 0, i))
+								ret |= (1 << i);
+					}
+
+					for (i = RETRO_DEVICE_ID_JOYPAD_B; i <= RETRO_DEVICE_ID_JOYPAD_R; i++)
+					{
+						bool pressed = ret & (1 << i);
+						uint16_t button_press = snes_lut[i];
+
+						if (pressed)
+							joypad[j * 2 + port] |= button_press;
+						else
+							joypad[j * 2 + port] &= ~button_press;
+					}
+				}
+			}
+			break;
+			case RETRO_DEVICE_MOUSE:
+			{
+				int32_t _x, _y;
+				_x = input_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X);
+				_y = input_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_Y);
+				input_vars.retro_mouse_state[port][0] += _x;
+				input_vars.retro_mouse_state[port][1] += _y;
+				S9xApplyCommand(keymap[BTN_POINTER + port], input_vars.retro_mouse_state[port][0], input_vars.retro_mouse_state[port][1]);
+				for (i = RETRO_DEVICE_ID_MOUSE_LEFT; i <= RETRO_DEVICE_ID_MOUSE_RIGHT; i++)
+					S9xApplyCommand(keymap[MAKE_BUTTON(port + 1, i)], input_cb(port, RETRO_DEVICE_MOUSE, 0, i), 0);
+			}
+			break;
+			case RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE:
+				input_vars.retro_scope_state[0] += input_cb(port, RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE, 0, RETRO_DEVICE_ID_LIGHTGUN_X);
+				input_vars.retro_scope_state[1] += input_cb(port, RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE, 0, RETRO_DEVICE_ID_LIGHTGUN_Y);
+				S9xApplyCommand(keymap[BTN_POINTER], input_vars.retro_scope_state[0], input_vars.retro_scope_state[1]);
+
+				for (i = RETRO_DEVICE_ID_LIGHTGUN_TRIGGER; i <= RETRO_DEVICE_ID_LIGHTGUN_PAUSE; i++)
+					S9xApplyCommand(keymap[MAKE_BUTTON(port + 1, i)], input_cb(port, RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE, 0, i), 0);
+			break;
+			case RETRO_DEVICE_LIGHTGUN_JUSTIFIER:
+			case RETRO_DEVICE_LIGHTGUN_JUSTIFIERS:
+				input_vars.retro_justifier_state[0][0] += input_cb(port, RETRO_DEVICE_LIGHTGUN_JUSTIFIER, 0, RETRO_DEVICE_ID_LIGHTGUN_X);
+				input_vars.retro_justifier_state[0][1] += input_cb(port, RETRO_DEVICE_LIGHTGUN_JUSTIFIER, 0, RETRO_DEVICE_ID_LIGHTGUN_Y);
+				S9xApplyCommand(keymap[BTN_POINTER], input_vars.retro_justifier_state[0][0], input_vars.retro_justifier_state[0][1]);
+
+				for (i = RETRO_DEVICE_ID_LIGHTGUN_TRIGGER; i <= RETRO_DEVICE_ID_LIGHTGUN_START; i++)
+					S9xApplyCommand(keymap[MAKE_BUTTON(port + 1, i)], input_cb(port, RETRO_DEVICE_LIGHTGUN_JUSTIFIER, 0, i), 0);
+			break;
+			default:
+				S9xMessage(S9X_MSG_ERROR, S9X_CATEGORY_EXTERNAL,"Unknown input device.");
+			break;
+		}
+	}
+}
+
+/* Direct-render path for RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER.
+ *
+ * Why this exists: the frontend reuses a single buffer in its swapchain,
+ * so handing the core a write-through pointer to that buffer lets the
+ * renderer skip the end-of-frame copy from GFX.Screen. The libretro spec
+ * is strict about this path: when video_cb is called with a pointer
+ * obtained from sw_fb, the (data, width, height, pitch) values must
+ * match exactly what the env call returned. We therefore acquire the
+ * buffer at the exact dimensions for THIS frame, not the worst case.
+ *
+ * The hook lives in cpuexec.c at the same point that recomputes
+ * IPPU.RenderedScreenWidth/Height for the new frame (V_Counter ==
+ * FIRST_VISIBLE_LINE). At that point the frame's planned width/height
+ * are known and no scanline has rendered yet, so swapping GFX.Screen
+ * is safe.
+ *
+ * Mid-frame mode changes can promote the rendered area beyond what we
+ * acquired (BGMode 5/6 or pseudo-hires switched on after the frame
+ * started, or interlace toggled on). The promotion code in ppu.c calls
+ * S9xLibretroSwFbAbort() before its line-doubling loops; that copies
+ * whatever has been rendered so far back to the persistent GFX.Screen
+ * (which is sized for the worst case) and restores the GFX.* fields.
+ * The promotion then proceeds in the persistent buffer and the frame
+ * finishes on the no-sw_fb path. */
+static void sw_fb_acquire_internal(unsigned width, unsigned height)
+{
+	struct retro_framebuffer fb;
+
+	/* Defensive restore: if a previous frame left GFX.Screen pointing
+	   at a frontend buffer (sw_fb_saved_screen non-NULL means we have
+	   a valid restoration point cached from an earlier acquire that
+	   wasn't cleanly released), put it back BEFORE we evaluate any
+	   conditions for this frame. This ensures the renderer always
+	   writes at the canonical pitch when the NTSC filter is on or
+	   when the redirect would otherwise be skipped, regardless of
+	   how state got desynced. */
+	if (sw_fb_saved_screen)
+	{
+		GFX.Screen        = sw_fb_saved_screen;
+		GFX.Pitch         = sw_fb_saved_pitch;
+		GFX.RealPPL       = GFX.Pitch >> 1;
+		GFX.PPL           = GFX.RealPPL << (IPPU.DoubleHeightPixels ? 1 : 0);
+		sw_fb_saved_screen = NULL;
+	}
+	sw_fb_active = false;
+
+	if (!libretro_supports_sw_fb || !IPPU.RenderThisFrame || snes_ntsc_filter)
+		return;
+	if (width == 0 || height == 0)
+		return;
+
+	memset(&fb, 0, sizeof(fb));
+	fb.width        = width;
+	fb.height       = height;
+	fb.access_flags = RETRO_MEMORY_ACCESS_WRITE;
+
+	if (!environ_cb(RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER, &fb))
+		return;
+	if (fb.format != RETRO_PIXEL_FORMAT_RGB565)
+		return;
+	if (!fb.data)
+		return;
+	/* Reject buffers wider than our persistent GFX.Screen: the renderer
+	   indexes GFX.SubScreen with the same Offset += GFX.PPL stride it
+	   uses for GFX.Screen, and SubScreen is sized at init for the
+	   max-width pitch. A wider stride here would walk past SubScreen's
+	   allocation. Smaller is fine - we just use a sub-region of
+	   SubScreen. */
+	if ((int)fb.pitch > GFX.Pitch)
+		return;
+	/* Sanity: pitch must accommodate the requested width. */
+	if (fb.pitch < width * sizeof(uint16_t))
+		return;
+
+	sw_fb_saved_screen = GFX.Screen;
+	sw_fb_saved_pitch  = GFX.Pitch;
+
+	GFX.Screen   = (uint16_t *)fb.data;
+	GFX.Pitch    = (int)fb.pitch;
+	GFX.RealPPL  = GFX.Pitch >> 1;
+	GFX.PPL      = GFX.RealPPL << (IPPU.DoubleHeightPixels ? 1 : 0);
+
+	sw_fb_data   = fb.data;
+	sw_fb_width  = width;
+	sw_fb_height = height;
+	sw_fb_pitch  = fb.pitch;
+	sw_fb_active = true;
+}
+
+void S9xLibretroSwFbAcquire(int width, int height)
+{
+	sw_fb_acquire_internal((unsigned)width, (unsigned)height);
+}
+
+/* Abort an in-progress sw_fb redirect. Called from ppu.c when mid-frame
+   resolution promotion forces us off the direct-render path. Copies any
+   pixels rendered so far from fb.data back to the original GFX.Screen,
+   then restores the GFX.* fields. After this returns sw_fb_active is
+   false and GFX.Screen points at the persistent worst-case buffer. */
+void S9xLibretroSwFbAbort(void)
+{
+	unsigned y;
+	const uint8_t *src;
+	uint8_t *dst;
+	size_t copy_bytes;
+
+	if (!sw_fb_active)
+		return;
+
+	/* Copy the partial render back. We don't know how much of the buffer
+	   was actually written, but the renderer has been writing scanlines
+	   0..(height-1) in order via GFX.S, and the post-render hires/
+	   interlace promotion is the only thing that needs to re-read those
+	   pixels. Copy the full acquired region; cost is bounded by
+	   sw_fb_pitch * sw_fb_height = at most 1208 * 478 = 577 KB, only
+	   when a mid-frame promotion fires. */
+	src = (const uint8_t *)sw_fb_data;
+	dst = (uint8_t *)sw_fb_saved_screen;
+	copy_bytes = sw_fb_width * sizeof(uint16_t);
+	for (y = 0; y < sw_fb_height; y++)
+	{
+		memcpy(dst, src, copy_bytes);
+		src += sw_fb_pitch;
+		dst += sw_fb_saved_pitch;
+	}
+
+	GFX.Screen   = sw_fb_saved_screen;
+	GFX.Pitch    = sw_fb_saved_pitch;
+	GFX.RealPPL  = GFX.Pitch >> 1;
+	GFX.PPL      = GFX.RealPPL << (IPPU.DoubleHeightPixels ? 1 : 0);
+
+	sw_fb_active = false;
+	sw_fb_saved_screen = NULL;  /* mark restored */
+}
+
+/* Release the redirect after S9xMainLoop completes successfully (no
+   abort). Restores GFX.* without copying back, since S9xDeinitUpdate
+   already called video_cb on fb.data. */
+static void sw_fb_release_after_frame(void)
+{
+	if (!sw_fb_active)
+		return;
+
+	GFX.Screen = sw_fb_saved_screen;
+	GFX.Pitch  = sw_fb_saved_pitch;
+	GFX.RealPPL = GFX.Pitch >> 1;
+	GFX.PPL     = GFX.RealPPL << (IPPU.DoubleHeightPixels ? 1 : 0);
+	sw_fb_active = false;
+	sw_fb_saved_screen = NULL;  /* mark restored - prevents the
+	                               defensive re-restore in the next
+	                               acquire from undoing valid state */
+}
+
+#ifdef PS2
+void retro_run(void)
+{
+    int result = -1;
+    bool okay = environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &result);
+    if (okay)
+    {
+        IPPU.RenderThisFrame = (result & 0x01) != 0;
+        audio_hard_disabled = (result & 0x08) != 0;
+        Settings.HardDisableAudio = audio_hard_disabled;
+    }
+    else
+    {
+        IPPU.RenderThisFrame = true;
+        audio_hard_disabled = false;
+        Settings.HardDisableAudio = false;
+    }
+
+    poll_cb();
+    report_buttons();
+    ++aurora_frame_phase;
+    S9xMainLoop();
+    sw_fb_release_after_frame();
+    audio_upload_samples();
+}
+#else
+void retro_run(void)
+{
+	int result = -1;
+	bool okay = false;
+	bool updated = false;
+
+#ifndef PS2
+	S9xHdPackFrameBegin();
+#endif
+
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+	{
+		check_variables(false);
+		update_geometry();
+	}
+
+	okay = (environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &result));
+	if (okay)
+	{
+		bool videoEnabled = 0 != (result & 0x01);
+		bool hardDisableAudio = 0 != (result & 0x08);
+		IPPU.RenderThisFrame = videoEnabled;
+
+		/* RETRO_AV_ENABLE_AUDIO (0x02) is intentionally ignored: it says the
+		   frontend will throw these samples away, not that the core may stop
+		   producing them. See audio_hard_disabled. */
+		audio_hard_disabled = hardDisableAudio;
+		Settings.HardDisableAudio = hardDisableAudio;
+	}
+	else
+	{
+		IPPU.RenderThisFrame = true;
+		audio_hard_disabled = false;
+		Settings.HardDisableAudio = false;
+	}
+
+	if ((frameskip_type > 0) &&
+	    retro_audio_buff_active &&
+	    IPPU.RenderThisFrame)
+	{
+		bool skip_frame;
+		switch (frameskip_type)
+		{
+			case 1: /* auto */
+				skip_frame = retro_audio_buff_underrun;
+				break;
+			case 2: /* manual */
+				skip_frame = (retro_audio_buff_occupancy < frameskip_threshold);
+				break;
+			default:
+				skip_frame = false;
+				break;
+		}
+
+		if (skip_frame)
+		{
+			if (frameskip_counter < FRAMESKIP_MAX)
+			{
+				IPPU.RenderThisFrame = false;
+				frameskip_counter++;
+			}
+			else
+				frameskip_counter = 0;
+		}
+	}
+	else
+		frameskip_counter = 0;
+
+	/* If frameskip/timing settings have changed,
+	 * update frontend audio latency
+	 * > Can do this before or after the frameskip
+	 *   check, but doing it after means we at least
+	 *   retain the current frame's audio output */
+	if (update_audio_latency)
+	{
+		environ_cb(RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY, &retro_audio_latency);
+		update_audio_latency = false;
+  }
+
+	poll_cb();
+	report_buttons();
+
+	S9xMainLoop();
+	sw_fb_release_after_frame();
+
+	audio_upload_samples();
+}
+
+#endif
+
+/* Decide whether this (de)serialisation may take the fast in-place path.
+ *
+ * "Fast" here means the state is one the core itself produced moments ago and
+ * is about to consume again, so S9xUnfreezeFromStream can read the big blocks
+ * straight into VRAM/WRAM/SRAM/fillram instead of staging them through
+ * local copies. The staging exists so a truncated or corrupt state cannot
+ * half-apply, which matters for a file off disk and does not matter for
+ * runahead, preemptive frames or netplay rollback.
+ *
+ * RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT is the supported way to ask. Every
+ * context other than NORMAL is a frontend-internal state, and all three of
+ * them want the fast path. RETRO_AV_ENABLE_FAST_SAVESTATES carries the same
+ * information from the same frontend flag but is deprecated, so it is only
+ * the fallback for frontends that do not answer the context query. */
+#ifdef PS2
+static uint8_t savestate_wants_fast_path(void)
+{
+    /* AURORA_SNES9X2010_V2_PS2LEAN_20260824: file-backed Aurora states favour corruption-safe staging. */
+    return FALSE;
+}
+#else
+static uint8_t savestate_wants_fast_path(void)
+{
+	enum retro_savestate_context context = RETRO_SAVESTATE_CONTEXT_NORMAL;
+	enum retro_av_enable_flags   av      = (enum retro_av_enable_flags) 0;
+
+	if (environ_cb(RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT, &context))
+		return (context != RETRO_SAVESTATE_CONTEXT_NORMAL) ? TRUE : FALSE;
+
+	if (environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &av))
+		return (0 != (av & RETRO_AV_ENABLE_FAST_SAVESTATES)) ? TRUE : FALSE;
+
+	return FALSE;
+}
+
+#endif
+
+size_t retro_serialize_size(void)
+{
+	int32_t size = SnapshotSize();
+
+	if (size < 0)
+		return 0;
+
+	return (size_t)size;
+}
+
+bool retro_serialize(void *data, size_t size)
+{
+	Settings.FastSavestates = savestate_wants_fast_path();
+
+	S9xSetStreamBuffer((uint8_t*)data, (uint64_t)size);
+
+	if (S9xFreezeGame() == FALSE)
+		return FALSE;
+
+	return TRUE;
+}
+
+bool retro_unserialize(const void * data, size_t size)
+{
+	Settings.FastSavestates = savestate_wants_fast_path();
+
+	S9xSetStreamBuffer((uint8_t*)data, (uint64_t)size);
+
+	if (S9xUnfreezeGame() == FALSE)
+		return FALSE;
+
+	return TRUE;
+}
+
+#ifdef PS2
+void retro_cheat_reset(void) {}
+void retro_cheat_set(unsigned index, bool enabled, const char *code)
+{ (void)index; (void)enabled; (void)code; }
+#else
+void retro_cheat_reset(void)
+{
+	S9xDeleteCheats();
+	S9xApplyCheats();
+}
+
+void retro_cheat_set(unsigned index, bool enabled, const char *code)
+{
+	uint32_t address;
+	uint8_t val;
+
+	uint8_t sram;
+	uint8_t bytes[3]; /* used only by GoldFinger, ignored for now */
+
+	if (S9xGameGenieToRaw(code, &address, &val) != NULL &&
+		S9xProActionReplayToRaw(code, &address, &val) != NULL &&
+		S9xGoldFingerToRaw(code, &address, &sram, &val, bytes) != NULL)
+	{
+		/* Ignore bad codes. */
+		return;
+	}
+	if (index > Cheat.num_cheats)
+		return; /* Ignore cheat added in weird order. */
+
+	if (index == Cheat.num_cheats)
+		Cheat.num_cheats++;
+
+	Cheat.c[index].address = address;
+	Cheat.c[index].byte = val;
+	Cheat.c[index].enabled = enabled;
+
+	Cheat.c[index].saved = FALSE; /* it'll be saved next time cheats run */
+
+	Settings.ApplyCheats = true;
+	S9xApplyCheats();
+}
+
+#endif
+
+#define MAX_MAPS 32
+static struct retro_memory_descriptor memorydesc[MAX_MAPS];
+static unsigned memorydesc_c;
+
+static bool merge_mapping(void)
+{
+	struct retro_memory_descriptor *a, *b;
+	uint32_t len;
+
+	if (memorydesc_c == 1)
+		return false; /* can't merge the only one */
+
+	a = &memorydesc[MAX_MAPS - (memorydesc_c - 1)];
+	b = &memorydesc[MAX_MAPS - memorydesc_c];
+
+	if (a->flags != b->flags)
+		return false;
+	if (a->disconnect != b->disconnect)
+		return false;
+	if (a->len != b->len)
+		return false;
+	if (a->addrspace || b->addrspace)
+		return false; /* we don't use these */
+
+	if (((char*)a->ptr) + a->offset == ((char*)b->ptr) + b->offset && a->select == b->select)
+	{
+		a->select &= ~(a->start ^ b->start);
+		memorydesc_c--;
+		return true;
+	}
+
+	len = a->len;
+	if (!len)
+		len=(0x1000000 - a->select);
+
+	if (len && ((len - 1) & (len | a->disconnect)) == 0 && ((char*)a->ptr) + a->offset + len == ((char*)b->ptr) + b->offset)
+	{
+		a->select &= ~len;
+		a->disconnect &= ~len;
+		memorydesc_c--;
+		return true;
+	}
+	return false;
+}
+
+#ifdef PS2
+void S9xAppendMapping(struct retro_memory_descriptor *desc)
+{ (void)desc; }
+#else
+void S9xAppendMapping(struct retro_memory_descriptor *desc)
+{
+	/* do it backwards - snes9x defines the last one to win, while we define
+	 * the first one to win */
+	memcpy(&memorydesc[MAX_MAPS - (++memorydesc_c)], desc, sizeof(struct retro_memory_descriptor));
+	while (merge_mapping())
+	{
+	}
+}
+
+#endif
+
+static void init_descriptors(void)
+{
+#define describe_buttons(INDEX)	\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },	\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,    "D-Pad Up" },		\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "D-Pad Down" },	\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT, "D-Pad Right" },		\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,     "B" },		\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,     "A" },			\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,     "X" },		\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,     "Y" },			\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,     "L" },		\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,     "R" },			\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,   "Select" },	\
+		{ INDEX, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,    "Start" },
+
+	struct retro_input_descriptor desc[] = {
+		describe_buttons(0)
+		describe_buttons(1)
+		describe_buttons(2)
+		describe_buttons(3)
+		describe_buttons(4)
+		{ 0, 0, 0, 0, NULL }
+	};
+	environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
+}
+
+#ifdef PS2
+bool retro_load_game(const struct retro_game_info *game)
+{
+    int loaded;
+    if (!game || !game->data || !game->size)
+        return false;
+
+    memorydesc_c = 0;
+    aurora_detected_sram_mask = 0;
+    /* Region must be selected before LoadROM/InitROM. */
+    check_variables(true);
+    S9xSetStreamBuffer((uint8_t *)game->data, (uint64_t)game->size);
+    loaded = LoadROM();
+    /* LoadROM copied/deinterleaved what it needs into Memory.ROM. */
+    S9xSetStreamBuffer(NULL, 0);
+    if (!loaded)
+    {
+        const char *const err_msg = "ROM loading failed.";
+        S9xMessage(S9X_MSG_ERROR, S9X_CATEGORY_EXTERNAL, err_msg);
+        return false;
+    }
+
+    Settings.MSU1 = FALSE;
+    aurora_detected_sram_mask = Memory.SRAMMask;
+    S9xAuroraApplySramOverride();
+    return true;
+}
+#else
+bool retro_load_game(const struct retro_game_info *game)
+{
+	int loaded;
+	struct retro_memory_map map;
+
+	init_descriptors();
+	memorydesc_c = 0;
+
+	/* Hack. S9x cannot do stuff from RAM. <_< */
+	S9xSetStreamBuffer((uint8_t*)game->data, (uint64_t)game->size);
+
+	loaded = LoadROM();
+	if (!loaded)
+	{
+		const char *const err_msg = "ROM loading failed.";
+		struct retro_message msg = { err_msg, 360 };
+
+		S9xMessage(S9X_MSG_ERROR, S9X_CATEGORY_EXTERNAL, err_msg);
+
+		if (environ_cb)
+			environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
+
+		return FALSE;
+	}
+
+	/* MSU1: locate companion files next to the ROM and enable the chip if a
+	   "<rom>.msu" data ROM or "<rom>-0.pcm" audio track is present.
+
+	   The ROM image is loaded from the frontend's memory buffer (need_fullpath
+	   is false, to preserve softpatching and buffer loading for every game), so
+	   game->path is not guaranteed to be non-NULL. MSU1 nevertheless needs the
+	   on-disk ROM path to find its companion files, so we ask the frontend for
+	   it via RETRO_ENVIRONMENT_GET_GAME_INFO_EXT, which supplies the content
+	   path even when the ROM was handed over as a buffer. We fall back to
+	   game->path for older frontends that lack the ext interface. */
+	Settings.MSU1 = FALSE;
+	{
+		const char *msu_path = NULL;
+		char        rebuilt[PATH_MAX + 8];
+		const struct retro_game_info_ext *info_ext = NULL;
+
+		if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_GAME_INFO_EXT, &info_ext) && info_ext)
+		{
+			if (info_ext->full_path && info_ext->full_path[0])
+				msu_path = info_ext->full_path;
+			else if (info_ext->dir && info_ext->name)
+			{
+				/* Reconstruct "<dir>/<name>.<ext>"; MSU1 resolution only needs
+				   the directory + basename, so any extension resolves the same
+				   companion files. */
+				snprintf(rebuilt, sizeof(rebuilt), "%s/%s.%s",
+					info_ext->dir,
+					info_ext->name,
+					(info_ext->ext && info_ext->ext[0]) ? info_ext->ext : "sfc");
+				msu_path = rebuilt;
+			}
+		}
+
+		if (!msu_path && game->path && game->path[0])
+			msu_path = game->path;
+
+		if (msu_path)
+		{
+			S9xMSU1SetROMPath(msu_path);
+			if (S9xMSU1ROMExists())
+			{
+				Settings.MSU1 = TRUE;
+				S9xResetMSU1();
+				S9xMSU1Init();
+			}
+		}
+	}
+
+	check_variables(true);
+
+	retro_set_audio_buff_status_cb();
+	set_system_specs();
+
+	map.descriptors = memorydesc + MAX_MAPS - memorydesc_c;
+	map.num_descriptors = memorydesc_c;
+
+	environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &map);
+
+	if (game && game->path && S9xHdPackInit(game->path))
+	{
+		/* Composite frames come from the pack's buffer; direct
+		   frontend-framebuffer rendering must stay off so GFX.Screen
+		   remains the internal buffer the compositor reads. */
+		libretro_sw_fb_checked  = true;
+		libretro_supports_sw_fb = false;
+	}
+
+	msu1_latch_playback_rate();
+
+	return TRUE;
+}
+
+#endif
+
+bool retro_load_game_special(unsigned game_type, const struct retro_game_info *info, size_t num_info)
+{
+	/* Satellaview subsystem: Slot A = BS-X base cartridge, Slot B = optional
+	   BS Memory pack. Mirrors mainline snes9x's two-slot model. The base cart
+	   is loaded as the running ROM through the normal path (so header-based
+	   BS-X detection in S9xInitBSX still applies); the memory-pack dump, when
+	   present, is copied into the BS flash region so the BS-X BIOS sees a
+	   cassette to browse and flash. The single-ROM heuristic path is retained
+	   for auto-detected dumped BS games and the BIOS loaded on its own. */
+	int loaded;
+	const struct retro_game_info *base;
+	const struct retro_game_info *pack;
+
+	if (game_type == RETRO_GAME_TYPE_SUFAMI_TURBO)
+	{
+		/* Sufami Turbo: assemble the base-cassette BIOS + one or two minicart
+		 * dumps into the "combined image" layout that the existing Sufami Turbo
+		 * pseudo-LoROM map consumes (BIOS mirrored across 0..0x100000, minicart
+		 * A at 0x100000, minicart B at 0x200000), then load it through the
+		 * normal path. This reuses the verified combined-image mapping instead
+		 * of the bit-rotted, file-path-based LoadMultiCart machinery.
+		 *
+		 * The base cassette is the 256KB "BANDAI SFC-ADX"/"SFC-ADX BACKUP"
+		 * firmware; a minicart is "BANDAI SFC-ADX" WITHOUT the second signature.
+		 * We accept the two ROMs in any slot order: whichever is the base
+		 * cassette becomes banks $00-$1F, and the minicart(s) go into slots
+		 * A/B. If neither ROM is a base cassette the load is rejected (a BIOS
+		 * is required; there is no HLE path yet). */
+		const struct retro_game_info *bios = NULL;
+		const struct retro_game_info *miniA = NULL;
+		const struct retro_game_info *miniB = NULL;
+		uint8_t *image;
+		uint32_t total;
+		unsigned i;
+
+		if (!info || num_info < 1)
+			return (false);
+
+		for (i = 0; i < num_info && i < 2; i++)
+		{
+			const struct retro_game_info *g = &info[i];
+			const uint8_t *d;
+			if (!g->data || g->size < 0x8000)
+				continue;
+			d = (const uint8_t *) g->data;
+			if (strncmp((const char *) d, "BANDAI SFC-ADX", 14) != 0)
+				continue;
+			if (g->size >= 0x40000
+			 && strncmp((const char *) (d + 0x10), "SFC-ADX BACKUP", 14) == 0)
+			{
+				if (!bios)
+					bios = g;              /* base cassette */
+			}
+			else if (!miniA)
+				miniA = g;                 /* first minicart */
+			else if (!miniB)
+				miniB = g;                 /* second minicart (link play) */
+		}
+
+		/* A base cassette and at least one minicart are required. */
+		if (!bios || !miniA)
+			return (false);
+
+		image = (uint8_t *) calloc(1, MAX_ROM_SIZE);
+		if (!image)
+			return (false);
+
+		/* Mirror the 256KB base cassette across banks $00-$1F (0..0x100000),
+		 * matching how a combined ST image is laid out. */
+		{
+			uint32_t biossz = (uint32_t) bios->size;
+			uint32_t off;
+			if (biossz > 0x40000)
+				biossz = 0x40000;
+			for (off = 0; off + biossz <= 0x100000; off += 0x40000)
+				memcpy(image + off, bios->data, biossz);
+		}
+
+		/* Minicart A -> 0x100000 (banks $20-$3F). */
+		{
+			uint32_t szA = (uint32_t) miniA->size;
+			if (szA > 0x100000)
+				szA = 0x100000;
+			memcpy(image + 0x100000, miniA->data, szA);
+		}
+
+		/* Minicart B -> 0x200000 (banks $40-$5F), when present. */
+		if (miniB)
+		{
+			uint32_t szB = (uint32_t) miniB->size;
+			if (szB > 0x100000)
+				szB = 0x100000;
+			memcpy(image + 0x200000, miniB->data, szB);
+			total = 0x300000;
+		}
+		else
+			total = 0x200000;
+
+		init_descriptors();
+		memorydesc_c = 0;
+
+		S9xSetStreamBuffer(image, (uint64_t) total);
+		loaded = LoadROM();
+		free(image);
+		if (!loaded)
+			return (false);
+
+		Settings.MSU1 = FALSE;
+		return (true);
+	}
+
+	if (game_type != RETRO_GAME_TYPE_BSX)
+		return (false);
+	if (!info || num_info < 1 || !info[0].data)
+		return (false);
+
+	base = &info[0];
+	pack = (num_info >= 2 && info[1].data && info[1].size) ? &info[1] : NULL;
+
+	init_descriptors();
+	memorydesc_c = 0;
+
+	/* Load the base cartridge as the running ROM. */
+	S9xSetStreamBuffer((uint8_t *) base->data, (uint64_t) base->size);
+	loaded = LoadROM();
+	if (!loaded)
+		return (false);
+
+	/* Copy the memory-pack dump into the BS flash region (Memory.BSRAM =
+	   Memory.ROM + 0x400000). S9xInitBSX has already run inside LoadROM and
+	   set up the base-unit mapping; the pack now backs the flash cassette. */
+	if (pack)
+	{
+		uint32_t pack_size = (uint32_t) pack->size;
+		if (pack_size > (uint32_t)(MAX_ROM_SIZE - 0x400000))
+			pack_size = (uint32_t)(MAX_ROM_SIZE - 0x400000);
+		memcpy(Memory.BSRAM, pack->data, pack_size);
+
+		/* Re-initialise the flash chip over the freshly-loaded pack image as
+		   a writable Flash cassette. */
+		S9xBSFlashInit(Memory.BSRAM, pack_size ? pack_size : 0x200000, FALSE);
+	}
+
+	Settings.MSU1 = FALSE;
+	msu1_latch_playback_rate();
+	return (true);
+}
+
+void retro_unload_game (void)
+{
+	S9xHdPackDeinit();
+	/* See retro_deinit: with pause-on-menu disabled the frontend may
+	   tear down while a frame is mid-render. Unwind any active sw_fb
+	   redirect so subsequent code (including a re-load_game without an
+	   intervening retro_deinit) sees GFX.Screen at its original value. */
+	if (sw_fb_saved_screen)
+	{
+		GFX.Screen   = sw_fb_saved_screen;
+		GFX.Pitch    = sw_fb_saved_pitch;
+		sw_fb_saved_screen = NULL;
+		sw_fb_active = false;
+	}
+}
+
+unsigned retro_get_region (void)
+{
+	return Settings.PAL ? RETRO_REGION_PAL : RETRO_REGION_NTSC;
+}
+
+/* ---------------------------------------------------------------------------
+ * Pseudo-hires blend
+ *
+ * Games that set the pseudo-hires bit ($2133 & 8 -> IPPU.PseudoHires) emit the
+ * main and sub screens in alternating 256-px columns within a genuine 512-px
+ * frame. On original hardware over a composite/RF signal the limited bandwidth
+ * blurs each adjacent column pair together, which the games exploit to fake
+ * transparency (waterfalls, glass, fog: Kirby's Dream Land 3, Jurassic Park).
+ * With a digital scaler the columns stay distinct and the effect is lost.
+ *
+ * This post-pass applies a 2-tap horizontal box filter to the finished 512-px
+ * frame, in place: out[x] = avg(orig[x], orig[x-1]). It reproduces the
+ * composite blur while preserving the full 512-px resolution (it does NOT
+ * collapse to 256 px the way snes9x2005 does). Each output pixel is averaged
+ * against the *original* left neighbour, so the blur stays a true 2-tap and
+ * does not smear across the scanline.
+ *
+ * The per-pixel average is the same overflow-safe RGB565 halving-add identity
+ * used by the tile compositor in src/tile.c (tile_color_add_half):
+ *     avg = ((a & 0xF7DE) >> 1) + ((b & 0xF7DE) >> 1) + (a & b & 0x0821)
+ * which is bit-exact to per-channel floor((ca+cb)/2). SIMD kernels (SSE2 /
+ * NEON, selected at compile time exactly like src/tile.c) must stay bit-exact
+ * with the scalar reference; a 256-px scratch copy of the original row feeds
+ * the vector loads so the in-place store cannot perturb a not-yet-read
+ * neighbour.
+ *
+ * Gated on width == 512 && IPPU.PseudoHires: true Mode 5/6 hires is left sharp,
+ * and lores frames are untouched. Skipped when the NTSC filter is active, since
+ * that path already performs its own composite bandwidth simulation.
+ * ------------------------------------------------------------------------- */
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#define HIRES_BLEND_SSE2 1
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define HIRES_BLEND_NEON 1
+#endif
+
+static uint16_t hires_blend_pix(uint16_t a, uint16_t b)
+{
+	return (uint16_t)(((a & 0xF7DEu) >> 1) + ((b & 0xF7DEu) >> 1) + (a & b & 0x0821u));
+}
+
+/* scratch must hold at least 'width' uint16_t (width <= 512 here). */
+static void hires_blend_row(uint16_t *row, int width, uint16_t *scratch)
+{
+	int x;
+
+	for (x = 0; x < width; x++)
+		scratch[x] = row[x];
+
+	x = 1;
+
+#if defined(HIRES_BLEND_SSE2)
+	{
+		const __m128i mask_no_low = _mm_set1_epi16((short) 0xF7DE);
+		const __m128i mask_low    = _mm_set1_epi16((short) 0x0821);
+		for (; x + 8 <= width; x += 8)
+		{
+			__m128i cur  = _mm_loadu_si128((const __m128i*)(scratch + x));
+			__m128i prev = _mm_loadu_si128((const __m128i*)(scratch + x - 1));
+			__m128i a    = _mm_srli_epi16(_mm_and_si128(cur,  mask_no_low), 1);
+			__m128i b    = _mm_srli_epi16(_mm_and_si128(prev, mask_no_low), 1);
+			__m128i carry= _mm_and_si128(_mm_and_si128(cur, prev), mask_low);
+			_mm_storeu_si128((__m128i*)(row + x),
+				_mm_add_epi16(_mm_add_epi16(a, b), carry));
+		}
+	}
+#elif defined(HIRES_BLEND_NEON)
+	{
+		const uint16x8_t mask_no_low = vdupq_n_u16(0xF7DE);
+		const uint16x8_t mask_low    = vdupq_n_u16(0x0821);
+		for (; x + 8 <= width; x += 8)
+		{
+			uint16x8_t cur  = vld1q_u16(scratch + x);
+			uint16x8_t prev = vld1q_u16(scratch + x - 1);
+			uint16x8_t a    = vshrq_n_u16(vandq_u16(cur,  mask_no_low), 1);
+			uint16x8_t b    = vshrq_n_u16(vandq_u16(prev, mask_no_low), 1);
+			uint16x8_t carry= vandq_u16(vandq_u16(cur, prev), mask_low);
+			vst1q_u16(row + x, vaddq_u16(vaddq_u16(a, b), carry));
+		}
+	}
+#endif
+
+	for (; x < width; x++)
+		row[x] = hires_blend_pix(scratch[x], scratch[x - 1]);
+}
+
+static void hires_blend_frame(uint16_t *screen, int width, int height, int pitch_px)
+{
+	/* One row of scratch; max hires width is 512. Kept on the stack so the
+	   pass needs no allocation and the buffer stays hot in L1. */
+	uint16_t scratch[512];
+	int y;
+
+	if (width > 512)
+		return; /* defensive: never the case for pseudo-hires */
+
+	for (y = 0; y < height; y++)
+		hires_blend_row(screen + (size_t)y * pitch_px, width, scratch);
+}
+
+void S9xDeinitUpdate(int width, int height)
+{
+	if (!IPPU.RenderThisFrame)
+		video_cb(NULL, width, height, GFX.Pitch);
+#ifndef PS2
+	else if (snes_ntsc_filter)
+	{
+		/* Both blitters (lores and hires) produce the same number of
+		   NTSC output pixels per scanline - the hires variant just
+		   consumes input pixels at twice the rate per output chunk.
+		   For a 256-wide lores frame and a 512-wide hires frame the
+		   output is identical at SNES_NTSC_OUT_WIDTH(256) = 602
+		   pixels. SNES_NTSC_OUT_WIDTH() is documented in
+		   filter/snes_ntsc.h as the LOW-RES output width formula and
+		   gives the wrong (1197) answer when applied to hires width
+		   - using that as the video_cb width would tell the frontend
+		   to display a 1197-wide frame whose rightmost ~595 pixels
+		   were never written. */
+		unsigned ntsc_out_width = SNES_NTSC_OUT_WIDTH(SNES_WIDTH);
+		size_t   ntsc_out_pitch = (size_t)ntsc_out_width * sizeof(uint16_t);
+		/* Tie the chroma burst phase to the emulated frame counter so
+		   the NTSC output is reproducible across retro_init/_deinit
+		   cycles and is unaffected by libretro frameskip (a skipped
+		   frame doesn't visit this branch but still bumps ICPU.Frame
+		   in cpuexec.c, so the phase advances either way). */
+		int burst_phase = (int)(ICPU.Frame % 3);
+
+		if (width > 512)
+		{
+			/* HD Mode 7 4x frame. The filter's output tops out at
+			   SNES_NTSC_OUT_WIDTH(256) = 602 px, so input columns
+			   beyond 512 add no information -- and the lores blitter,
+			   fed 1024-px rows, would write ~2400 px per line into the
+			   602-px-pitch buffer (garbage plus overflow within the
+			   allocation). Box-downsample each row 2:1 in place
+			   (per-channel floor average via the LSB-exact halving-add
+			   identity, as in S9xMode7VertResample) and take the hires
+			   path; 4x sub-pixel detail survives as anti-aliasing.
+			   In-place is safe: x ascends, reads at 2x/2x+1 stay ahead
+			   of the write at x. */
+			int y, x;
+			for (y = 0; y < height; y++)
+			{
+				uint16_t *row = GFX.Screen + (size_t) y * (GFX.Pitch >> 1);
+				for (x = 0; x < 512; x++)
+				{
+					uint16_t a = row[2 * x];
+					uint16_t b = row[2 * x + 1];
+					row[x] = (uint16_t) (((a & 0xF7DE) >> 1) + ((b & 0xF7DE) >> 1) + (a & b & 0x0821));
+				}
+			}
+			width = 512;
+		}
+
+		if (width == 512)
+			snes_ntsc_blit_hires(&snes_ntsc, GFX.Screen, GFX.Pitch / 2, burst_phase, width, height, ntsc_screen_buffer, (long)ntsc_out_pitch);
+		else
+			snes_ntsc_blit(&snes_ntsc, GFX.Screen, GFX.Pitch / 2, burst_phase, width, height, ntsc_screen_buffer, (long)ntsc_out_pitch);
+
+		video_cb(ntsc_screen_buffer, ntsc_out_width, height, ntsc_out_pitch);
+	}
+#else
+	/* AURORA_SNES9X2010_V1_PS2LEAN_20260824: no Blargg render branch on PS2 */
+#endif
+	else if (S9xHdPackActive())
+	{
+		int hd_w, hd_h, hd_pitch;
+		uint16_t *hd_frame = S9xHdPackComposite(width, height, &hd_w, &hd_h, &hd_pitch);
+		if (hd_frame)
+			video_cb(hd_frame, hd_w, hd_h, hd_pitch);
+		else
+			video_cb(GFX.Screen, width, height, GFX.Pitch);
+	}
+	else
+	{
+		/* Lazily probe sw_fb support on first non-NTSC frame. The probe
+		   only sets the libretro_supports_sw_fb flag; subsequent frames
+		   acquire via the cpuexec.c hook (S9xLibretroSwFbAcquire) at
+		   start-of-frame, where this frame's exact dimensions are known. */
+		if (!libretro_sw_fb_checked)
+		{
+			struct retro_framebuffer fb;
+			memset(&fb, 0, sizeof(fb));
+			fb.width         = width;
+			fb.height        = height;
+			fb.access_flags  = RETRO_MEMORY_ACCESS_WRITE;
+
+			if (environ_cb(RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER, &fb)
+					&& fb.format == RETRO_PIXEL_FORMAT_RGB565)
+			{
+				libretro_supports_sw_fb = true;
+				if (log_cb)
+					log_cb(RETRO_LOG_INFO, "Software framebuffer acquired successfully.\n");
+			}
+
+			libretro_sw_fb_checked = true;
+		}
+
+		/* Pseudo-hires composite-blur post-pass. Operates on the live
+		   buffer (sw_fb or GFX.Screen) just before presentation, only
+		   for genuine pseudo-hires frames; true Mode 5/6 hires and lores
+		   are left untouched. The NTSC branch above is never reached
+		   here, so this never double-blurs. */
+		if (pseudo_hires_blend && width == 512 && IPPU.PseudoHires)
+		{
+			if (sw_fb_active)
+				hires_blend_frame((uint16_t*)sw_fb_data, width, (int)sw_fb_height, (int)(sw_fb_pitch / sizeof(uint16_t)));
+			else
+				hires_blend_frame(GFX.Screen, width, height, GFX.Pitch / 2);
+		}
+
+		if (sw_fb_active)
+		{
+			/* Renderer wrote directly into the frontend's buffer; just
+			   present it. video_cb gets exactly the (data, width,
+			   height, pitch) values returned by the env call. No copy. */
+			video_cb(sw_fb_data, sw_fb_width, sw_fb_height, sw_fb_pitch);
+		}
+		else
+		{
+			/* Either sw_fb is unsupported, or this frame's acquire
+			   was skipped/aborted. Hand GFX.Screen to the frontend;
+			   the frontend's own copy into its swapchain is
+			   unavoidable on this path. */
+			video_cb(GFX.Screen, width, height, GFX.Pitch);
+		}
+	}
+}
+
+/* Dummy functions that should probably be implemented correctly later. */
+const char* S9xGetDirectory(uint32_t dirtype)
+{
+	const char *directory = NULL;
+
+	if (dirtype == BIOS_DIR || dirtype == SAT_DIR)
+	{
+		if (!environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &directory) ||
+		    !directory)
+		{
+			if (log_cb)
+				log_cb(RETRO_LOG_WARN, "No system directory defined, unable to load bios files.\n");
+		}
+	}
+
+	return directory;
+}
+
+static enum retro_log_level s9x_msg_priority_to_retro_log(S9xMessagePriority p)
+{
+   switch (p)
+   {
+      case S9X_MSG_VERBOSE:
+         return RETRO_LOG_DEBUG;
+      case S9X_MSG_INFO:
+         return RETRO_LOG_INFO;
+      case S9X_MSG_WARN:
+         return RETRO_LOG_WARN;
+      case S9X_MSG_ERROR:
+         return RETRO_LOG_ERROR;
+   }
+   return RETRO_LOG_INFO;
+}
+
+void S9xMessage (S9xMessagePriority p, S9xMessageCategory c, const char *msg)
+{
+	const char *const S9xMessageCategoryStr[] = {
+		"ROM", "PPU", "CPU", "APU", "MAP", "CONTROLS", "SNAPSHOT", "EXT"
+	};
+   enum retro_log_level p_info = s9x_msg_priority_to_retro_log(p);
+
+	if (log_cb)
+		log_cb(p_info, "%s: %s\n", S9xMessageCategoryStr[c], msg);
+}

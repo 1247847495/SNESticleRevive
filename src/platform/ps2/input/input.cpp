@@ -1,12 +1,16 @@
-#include <stdio.h>
+﻿#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <kernel.h>
+#include <sifrpc.h>
 
 #include "libpad.h"
 #include "libxpad.h"
 #include "libxmtap.h"
 #include "types.h"
 #include "input.h"
+typedef struct _mouse_data { Int32 x, y, wheel; Uint32 buttons; } mouse_data;
+enum { PS2MOUSE_READMODE_DIFF = 0, PS2MOUSE_READ = 0x1, PS2MOUSE_SETREADMODE = 0x2, PS2MOUSE_SETACCEL = 0x6, PS2MOUSE_RESET = 0xB, PS2MOUSE_ENUM = 0xC, PS2MOUSE_BIND_RPC_ID = 0x500C001, PS2MOUSE_AURORA_STATUS = 0x21 };
 #include "hw.h"
 
 /* On-screen log (defined in mainloop_ui.cpp, C linkage).  Used so the
@@ -14,6 +18,9 @@
    output never reaches the screen (DLog goes to the EE SIO FIFO, which
    needs a serial cable to read). */
 extern "C" void ScrPrintf(const char *pFormat, ...);
+/* Defined by embedded_irx.cpp. Guarding the bind with this status prevents
+   the stock libmouse-style endless wait when the IOP driver did not start. */
+extern "C" int UsbMouseDriverAvailable(void);
 
 static char _Input_PadBuf[INPUT_MAXPADS][256]
     __attribute__((aligned(64)))
@@ -24,10 +31,193 @@ static char _Input_PadBuf[INPUT_MAXPADS][256]
    0x80808080 is centred. */
 static Uint32 _Input_PadData[INPUT_MAXPADS];
 static Uint32 _Input_PadAnalog[INPUT_MAXPADS];
+/* AURORA_SAFE_HOTPATH_V4: derived once per fresh pad report, read many times/frame. */
+static Uint32 _Input_PadAnalogDpad[INPUT_MAXPADS];
 static int    _Input_bPadConnected[INPUT_MAXPADS];
 static Bool   _Input_bInitialized = FALSE;
 static Bool   _Input_bXPad = FALSE;
 static Int32  _Input_nPads = 0;
+
+/* AURORA_USB_SNES_MOUSE_INPUT_V1_5
+ * Direct bounded RPC client for PS2SDK ps2mouse.irx. V1.5 explicitly
+ * forces differential mode and 1.0 host acceleration, so raw X/Y counts
+ * remain 1:1 and diagonals are not re-scaled. */
+static SifRpcClientData_t _Input_MouseRpc __attribute__((aligned(64)));
+static Uint8  _Input_MouseRpcBuffer[128] __attribute__((aligned(64)));
+static Bool   _Input_bMouseRpcReady = FALSE;
+static Bool   _Input_bMouseConnected = FALSE;
+static Int32  _Input_MouseDeltaX = 0;
+static Int32  _Input_MouseDeltaY = 0;
+static Uint32 _Input_MouseButtons = 0;
+static Uint32 _Input_MouseEnumCountdown = 0;
+static Uint32 _Input_MouseAuroraStatus = 0;
+static InputSnesMouseModeE _Input_SnesMouseMode = INPUT_SNES_MOUSE_OFF;
+
+/* AURORA_COMPOSITE_MOUSE_V1 status bits from the project-local IOP driver. */
+#define INPUT_MOUSE_STATUS_DRIVER     0x01U
+#define INPUT_MOUSE_STATUS_HID_SEEN   0x02U
+#define INPUT_MOUSE_STATUS_BOOT_SEEN  0x04U
+#define INPUT_MOUSE_STATUS_CONNECTED  0x08U
+#define INPUT_MOUSE_STATUS_BOOT_PROTO 0x10U
+
+#define INPUT_MOUSE_ENUM_PERIOD       60
+#define INPUT_MOUSE_BIND_TRIES       250
+#define INPUT_MOUSE_BIND_SLEEP_US   2000
+
+static Bool _Input_MouseBindRpc(void)
+{
+    int i;
+
+    memset(&_Input_MouseRpc, 0, sizeof(_Input_MouseRpc));
+    for (i = 0; i < INPUT_MOUSE_BIND_TRIES; i++)
+    {
+        if (SifBindRpc(&_Input_MouseRpc, PS2MOUSE_BIND_RPC_ID, 0) < 0)
+            return FALSE;
+        if (_Input_MouseRpc.server)
+            return TRUE;
+        usleep(INPUT_MOUSE_BIND_SLEEP_US);
+    }
+    return FALSE;
+}
+
+static int _Input_MouseRpcCall(Uint32 uCommand, void *pOut, Uint32 nOut)
+{
+    const Uint8 *pUncached;
+
+    if (!_Input_bMouseRpcReady)
+        return -1;
+    if (nOut > sizeof(_Input_MouseRpcBuffer))
+        return -1;
+
+    memset(_Input_MouseRpcBuffer, 0, sizeof(_Input_MouseRpcBuffer));
+    if (SifCallRpc(
+            &_Input_MouseRpc,
+            uCommand,
+            0,
+            _Input_MouseRpcBuffer,
+            sizeof(_Input_MouseRpcBuffer),
+            _Input_MouseRpcBuffer,
+            sizeof(_Input_MouseRpcBuffer),
+            NULL,
+            NULL) < 0)
+        return -1;
+
+    pUncached = (const Uint8 *)UNCACHED_SEG(_Input_MouseRpcBuffer);
+    if (pOut && nOut)
+        memcpy(pOut, pUncached, nOut);
+    return 0;
+}
+
+static int _Input_MouseRpcCallU32(Uint32 uCommand, Uint32 uValue)
+{
+    if (!_Input_bMouseRpcReady)
+        return -1;
+
+    memset(_Input_MouseRpcBuffer, 0, sizeof(_Input_MouseRpcBuffer));
+    ((Uint32 *)_Input_MouseRpcBuffer)[0] = uValue;
+    if (SifCallRpc(
+            &_Input_MouseRpc,
+            uCommand,
+            0,
+            _Input_MouseRpcBuffer,
+            sizeof(_Input_MouseRpcBuffer),
+            _Input_MouseRpcBuffer,
+            sizeof(_Input_MouseRpcBuffer),
+            NULL,
+            NULL) < 0)
+        return -1;
+    return 0;
+}
+
+static void _Input_MouseInit(void)
+{
+    _Input_bMouseRpcReady = FALSE;
+    _Input_bMouseConnected = FALSE;
+    _Input_MouseDeltaX = 0;
+    _Input_MouseDeltaY = 0;
+    _Input_MouseButtons = 0;
+    _Input_MouseEnumCountdown = 0;
+    _Input_MouseAuroraStatus = 0;
+
+    if (!UsbMouseDriverAvailable())
+        return;
+
+    if (!_Input_MouseBindRpc())
+    {
+        printf("Input: ps2mouse RPC bind timed out; mouse disabled\n");
+        return;
+    }
+
+    _Input_bMouseRpcReady = TRUE;
+    _Input_MouseRpcCall(PS2MOUSE_RESET, NULL, 0);
+    /* Force the exact host contract rather than relying on driver defaults:
+       differential relative counts and a 1.0 acceleration multiplier. */
+    _Input_MouseRpcCallU32(PS2MOUSE_SETREADMODE, PS2MOUSE_READMODE_DIFF);
+    _Input_MouseRpcCallU32(PS2MOUSE_SETACCEL, 0x00010000U);
+    _Input_MouseRpcCall(PS2MOUSE_AURORA_STATUS,
+                        &_Input_MouseAuroraStatus,
+                        sizeof(_Input_MouseAuroraStatus));
+    printf("Input: USB mouse RPC ready (diff, accel=1.0, status=%02x)\n",
+           (unsigned)_Input_MouseAuroraStatus);
+}
+
+void InputMouseClearSnapshot(void)
+{
+    _Input_MouseDeltaX = 0;
+    _Input_MouseDeltaY = 0;
+    _Input_MouseButtons = 0;
+}
+
+void InputMousePollPostFrame(Bool bCaptureMotion)
+{
+    Uint32 nDevices = 0;
+    mouse_data data;
+
+    if (!_Input_bInitialized)
+        return;
+
+    InputMouseClearSnapshot();
+    if (_Input_SnesMouseMode != INPUT_SNES_MOUSE_USB)
+        return;
+
+    if (!_Input_bMouseRpcReady)
+    {
+        _Input_bMouseConnected = FALSE;
+        return;
+    }
+
+    if (!_Input_bMouseConnected)
+    {
+        if (_Input_MouseEnumCountdown > 0)
+        {
+            _Input_MouseEnumCountdown--;
+            return;
+        }
+        if (_Input_MouseRpcCall(PS2MOUSE_ENUM, &nDevices, sizeof(nDevices)) == 0)
+            _Input_bMouseConnected = nDevices > 0 ? TRUE : FALSE;
+        _Input_MouseEnumCountdown = INPUT_MOUSE_ENUM_PERIOD;
+        if (!_Input_bMouseConnected)
+            return;
+    }
+
+    memset(&data, 0, sizeof(data));
+    if (_Input_MouseRpcCall(PS2MOUSE_READ, &data, sizeof(data)) < 0)
+    {
+        _Input_bMouseConnected = FALSE;
+        _Input_MouseEnumCountdown = 0;
+        return;
+    }
+
+    if (bCaptureMotion)
+    {
+        _Input_MouseDeltaX = (Int32)data.x;
+        _Input_MouseDeltaY = (Int32)data.y;
+        /* AURORA_IRIXXXX_922543_MOUSE_BUTTONS_20260829
+         * Preserve the four low HID button bits for PicoDrive's Mega Mouse.
+         * Native SNES mouse still masks its own input back to the real 2 buttons. */
+        _Input_MouseButtons = (Uint32)data.buttons & 0x0FU;
+    }
+}
 
 /* Centred-stick value reported by libpad when the controller is digital
    only or when the analog stick is at rest. */
@@ -38,6 +228,21 @@ static Int32  _Input_nPads = 0;
    menus and feels comfortable on real DualShock pads, while still being
    loose enough that worn analog sticks register a deflection reliably. */
 #define INPUT_ANALOG_DEADZONE (0x30)
+
+/* A pure form of the old InputGetPadDpadFromAnalog calculation. Keeping it
+   here lets InputPoll compute the result exactly once when axes actually
+   change instead of every time frontend/gameplay asks for the same value. */
+static _INLINE Uint32 _InputAnalogAxesToDpad(Uint8 ljoy_h, Uint8 ljoy_v)
+{
+    Uint32 dpad = 0;
+
+    if ((int)ljoy_h < (INPUT_ANALOG_CENTER - INPUT_ANALOG_DEADZONE)) dpad |= PAD_LEFT;
+    if ((int)ljoy_h > (INPUT_ANALOG_CENTER + INPUT_ANALOG_DEADZONE)) dpad |= PAD_RIGHT;
+    if ((int)ljoy_v < (INPUT_ANALOG_CENTER - INPUT_ANALOG_DEADZONE)) dpad |= PAD_UP;
+    if ((int)ljoy_v > (INPUT_ANALOG_CENTER + INPUT_ANALOG_DEADZONE)) dpad |= PAD_DOWN;
+
+    return dpad;
+}
 
 static Uint8 _Input_PadPort[INPUT_MAXPADS][2] =
 {
@@ -264,33 +469,167 @@ Uint32 InputGetPadData(Uint32 uPad)
     return _Input_PadData[uPad];
 }
 
+/* AURORA_QN_ARKANOID_ANALOG_V2_20260828 */
+Uint32 InputGetPadAnalog(Uint32 uPad)
+{
+    if (!InputIsPadConnected(uPad))
+        return 0x80808080U;
+
+    return _Input_PadAnalog[uPad];
+}
+
+Bool InputIsMouseConnected(void)
+{
+    return _Input_bMouseConnected;
+}
+
+/* AURORA_CONTROLLER_SNES_MOUSE_V1
+ * Convert P1 into relative SNES Mouse motion without adding persistent
+ * emulation state. Analog motion is proportional and capped at four host
+ * counts/frame; the d-pad is a precise two-count override. The SNES mouse
+ * core still applies its authentic speed state afterwards. */
+#define INPUT_PAD_MOUSE_DEADZONE    18
+#define INPUT_PAD_MOUSE_DIVISOR     28
+#define INPUT_PAD_MOUSE_DPAD_STEP    2
+
+static Int32 _InputPadMouseAxisDelta(Int32 uAxis)
+{
+    Int32 d = uAxis - 0x80;
+    Int32 mag;
+
+    if (d > -INPUT_PAD_MOUSE_DEADZONE &&
+        d <  INPUT_PAD_MOUSE_DEADZONE)
+        return 0;
+
+    if (d < 0)
+    {
+        mag = -d - INPUT_PAD_MOUSE_DEADZONE;
+        mag = (mag + INPUT_PAD_MOUSE_DIVISOR - 1) /
+              INPUT_PAD_MOUSE_DIVISOR;
+        if (mag > 4) mag = 4;
+        return -mag;
+    }
+
+    mag = d - INPUT_PAD_MOUSE_DEADZONE;
+    mag = (mag + INPUT_PAD_MOUSE_DIVISOR - 1) /
+          INPUT_PAD_MOUSE_DIVISOR;
+    if (mag > 4) mag = 4;
+    return mag;
+}
+
+static void _InputGetControllerMouseData(Int32 *pDeltaX,
+                                         Int32 *pDeltaY,
+                                         Uint32 *pButtons)
+{
+    Uint32 packed = _Input_PadAnalog[0];
+    Uint32 pad = InputGetPadData(0);
+    Int32 dx = _InputPadMouseAxisDelta(
+        (Int32)((packed >> 16) & 0xff));
+    Int32 dy = _InputPadMouseAxisDelta(
+        (Int32)((packed >> 24) & 0xff));
+    Uint32 buttons = 0;
+
+    if (pad & PAD_LEFT)
+        dx = -INPUT_PAD_MOUSE_DPAD_STEP;
+    else if (pad & PAD_RIGHT)
+        dx = INPUT_PAD_MOUSE_DPAD_STEP;
+
+    if (pad & PAD_UP)
+        dy = -INPUT_PAD_MOUSE_DPAD_STEP;
+    else if (pad & PAD_DOWN)
+        dy = INPUT_PAD_MOUSE_DPAD_STEP;
+
+    if (pad & PAD_CROSS)
+        buttons |= 0x01U;
+    if (pad & PAD_CIRCLE)
+        buttons |= 0x02U;
+
+    if (pDeltaX) *pDeltaX = dx;
+    if (pDeltaY) *pDeltaY = dy;
+    if (pButtons) *pButtons = buttons;
+}
+
+void InputGetMouseData(Int32 *pDeltaX, Int32 *pDeltaY, Uint32 *pButtons)
+{
+    if (_Input_SnesMouseMode == INPUT_SNES_MOUSE_CONTROLLER)
+    {
+        _InputGetControllerMouseData(pDeltaX, pDeltaY, pButtons);
+        return;
+    }
+
+    if (pDeltaX) *pDeltaX = _Input_MouseDeltaX;
+    if (pDeltaY) *pDeltaY = _Input_MouseDeltaY;
+    if (pButtons) *pButtons = _Input_MouseButtons;
+}
+
+void InputSnesMouseSetMode(InputSnesMouseModeE eMode)
+{
+    if (eMode < INPUT_SNES_MOUSE_OFF ||
+        eMode >= INPUT_SNES_MOUSE_MODE_NUM)
+        eMode = INPUT_SNES_MOUSE_OFF;
+
+    _Input_SnesMouseMode = eMode;
+    InputMouseClearSnapshot();
+    if (eMode == INPUT_SNES_MOUSE_USB && !_Input_bMouseRpcReady)
+        _Input_MouseInit();
+    if (eMode != INPUT_SNES_MOUSE_USB)
+        _Input_MouseEnumCountdown = 0;
+}
+
+InputSnesMouseModeE InputSnesMouseGetMode(void)
+{
+    return _Input_SnesMouseMode;
+}
+
+void InputSnesMouseCycleModeDir(Int32 dir)
+{
+    Int32 mode;
+
+    if (dir == 0)
+        return;
+
+    mode = (Int32)_Input_SnesMouseMode + (dir < 0 ? -1 : 1);
+    if (mode < INPUT_SNES_MOUSE_OFF)
+        mode = INPUT_SNES_MOUSE_MODE_NUM - 1;
+    if (mode >= INPUT_SNES_MOUSE_MODE_NUM)
+        mode = INPUT_SNES_MOUSE_OFF;
+
+    InputSnesMouseSetMode((InputSnesMouseModeE)mode);
+}
+
+void InputSnesMouseCycleMode(void)
+{
+    InputSnesMouseCycleModeDir(1);
+}
+
+Bool InputSnesMouseShouldUse(void)
+{
+    if (_Input_SnesMouseMode == INPUT_SNES_MOUSE_CONTROLLER)
+        return InputIsPadConnected(0);
+    if (_Input_SnesMouseMode == INPUT_SNES_MOUSE_USB)
+        return _Input_bMouseRpcReady && _Input_bMouseConnected;
+    return FALSE;
+}
+
+const char *InputSnesMouseGetModeName(void)
+{
+    if (_Input_SnesMouseMode == INPUT_SNES_MOUSE_CONTROLLER)
+        return InputIsPadConnected(0) ? "手柄" : "手柄（未接P1）";
+    if (_Input_SnesMouseMode == INPUT_SNES_MOUSE_USB)
+    {
+        if (!_Input_bMouseRpcReady) return "USB（驱动未开）";
+        return _Input_bMouseConnected ? "USB" : "USB（无鼠标）";
+    }
+    return "关";
+}
+
+
 Uint32 InputGetPadDpadFromAnalog(Uint32 uPad)
 {
-    Uint32 packed;
-    int    ljoy_h;
-    int    ljoy_v;
-    Uint32 dpad = 0;
-
     if (!InputIsPadConnected(uPad))
         return 0;
 
-    packed = _Input_PadAnalog[uPad];
-    ljoy_h = (int)((packed >> 16) & 0xff);
-    ljoy_v = (int)((packed >> 24) & 0xff);
-
-    /* If the pad is reporting both axes exactly at centre, treat it as a
-       digital-only pad and skip the synthesis entirely. This avoids the
-       dead-zone test from accidentally emitting d-pad bits when the pad
-       has not negotiated DualShock mode. */
-    if (ljoy_h == INPUT_ANALOG_CENTER && ljoy_v == INPUT_ANALOG_CENTER)
-        return 0;
-
-    if (ljoy_h < (INPUT_ANALOG_CENTER - INPUT_ANALOG_DEADZONE)) dpad |= PAD_LEFT;
-    if (ljoy_h > (INPUT_ANALOG_CENTER + INPUT_ANALOG_DEADZONE)) dpad |= PAD_RIGHT;
-    if (ljoy_v < (INPUT_ANALOG_CENTER - INPUT_ANALOG_DEADZONE)) dpad |= PAD_UP;
-    if (ljoy_v > (INPUT_ANALOG_CENTER + INPUT_ANALOG_DEADZONE)) dpad |= PAD_DOWN;
-
-    return dpad;
+    return _Input_PadAnalogDpad[uPad];
 }
 
 void InputInit(Bool bXLib)
@@ -301,6 +640,7 @@ void InputInit(Bool bXLib)
     _Input_nPads = bXLib ? INPUT_MAXPADS : 2;
 
     memset(_Input_PadData, 0, sizeof(_Input_PadData));
+    memset(_Input_PadAnalogDpad, 0, sizeof(_Input_PadAnalogDpad));
     memset(_Input_bPadConnected, 0, sizeof(_Input_bPadConnected));
     memset(_Input_PadBuf, 0, sizeof(_Input_PadBuf));
     for (iPad = 0; iPad < INPUT_MAXPADS; iPad++)
@@ -315,7 +655,11 @@ void InputInit(Bool bXLib)
                        _Input_PadBuf[iPad]);
     }
 
+    /* AURORA_MOUSE_EXPLICIT_V3: Off/Controller do no mouse RPC.
+       Re-init USB only if it was already an explicit persisted runtime mode. */
     _Input_bInitialized = TRUE;
+    if (_Input_SnesMouseMode == INPUT_SNES_MOUSE_USB)
+        _Input_MouseInit();
 }
 
 void InputShutdown(void)
@@ -334,6 +678,7 @@ void InputShutdown(void)
     }
 
     memset(_Input_PadData, 0, sizeof(_Input_PadData));
+    memset(_Input_PadAnalogDpad, 0, sizeof(_Input_PadAnalogDpad));
     memset(_Input_bPadConnected, 0, sizeof(_Input_bPadConnected));
     for (iPad = 0; iPad < INPUT_MAXPADS; iPad++)
     {
@@ -341,6 +686,12 @@ void InputShutdown(void)
     }
 
     _Input_nPads = 0;
+    _Input_bMouseRpcReady = FALSE;
+    _Input_bMouseConnected = FALSE;
+    _Input_MouseDeltaX = _Input_MouseDeltaY = 0;
+    _Input_MouseButtons = 0;
+    _Input_MouseAuroraStatus = 0;
+    memset(&_Input_MouseRpc, 0, sizeof(_Input_MouseRpc));
     _Input_bInitialized = FALSE;
 }
 
@@ -391,6 +742,7 @@ void InputPoll(void)
             _Input_bPadConnected[iPad] = 0;
             _Input_PadData[iPad] = 0;
             _Input_PadAnalog[iPad] = 0x80808080U;
+            _Input_PadAnalogDpad[iPad] = 0;
             continue;
         }
 
@@ -493,10 +845,13 @@ void InputPoll(void)
                 | ((Uint32)padStatus.ljoy_h << 16)
                 | ((Uint32)padStatus.rjoy_v << 8)
                 | ((Uint32)padStatus.rjoy_h);
+            _Input_PadAnalogDpad[iPad] =
+                _InputAnalogAxesToDpad(padStatus.ljoy_h, padStatus.ljoy_v);
         }
         else
         {
             _Input_PadAnalog[iPad] = 0x80808080U; /* centred -> no phantom dpad */
+            _Input_PadAnalogDpad[iPad] = 0;
         }
     }
 }

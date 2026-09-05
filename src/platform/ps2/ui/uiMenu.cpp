@@ -14,12 +14,27 @@
 
 void CMenuScreen::SetEntries(char **ppStrings)
 {
+	/* AURORA_RUNTIME_SAFE_MENU_V1_4_1
+	 * Empty/dynamic menus must never leave a -1 or stale selection. */
 	m_nItems = 0;
+	if (!ppStrings)
+	{
+		m_iSelect = 0;
+		return;
+	}
 
 	while (*ppStrings && m_nItems < 32)
 	{
 		m_pEntries[m_nItems++] = *ppStrings;
 		ppStrings++;
+	}
+
+	if (m_nItems <= 0)
+		m_iSelect = 0;
+	else
+	{
+		if (m_iSelect < 0) m_iSelect = 0;
+		if (m_iSelect >= m_nItems) m_iSelect = m_nItems - 1;
 	}
 }
 
@@ -28,6 +43,8 @@ CMenuScreen::CMenuScreen()
 	m_iSelect = 0;
 	m_nItems  = 0;
 	m_iTop    = 40;
+	m_bHorizontal = FALSE;
+	m_pUserData = NULL;
 	memset(m_strText, 0, sizeof(m_strText));
 	m_strTitle[0] = 0;
 ///	SetEntries(_TestStr);
@@ -36,12 +53,21 @@ CMenuScreen::CMenuScreen()
 
 void CMenuScreen::SetTitle(const char *pTitle)
 {
-	strcpy(m_strTitle, pTitle);
+	/* AURORA_RUNTIME_SAFE_MENU_STRINGS_V1_4_2 */
+	if (!pTitle)
+		pTitle = "";
+	strncpy(m_strTitle, pTitle, sizeof(m_strTitle) - 1);
+	m_strTitle[sizeof(m_strTitle) - 1] = '\0';
 }
 
 void CMenuScreen::SetText(int iText, const char *pStr)
 {
-	strcpy(m_strText[iText], pStr);
+	if (iText < 0 || iText >= 4)
+		return;
+	if (!pStr)
+		pStr = "";
+	strncpy(m_strText[iText], pStr, sizeof(m_strText[iText]) - 1);
+	m_strText[iText][sizeof(m_strText[iText]) - 1] = '\0';
 }
 
 void CMenuScreen::SetSelection(Int32 iSelect)
@@ -95,26 +121,50 @@ void CMenuScreen::Draw()
 
 	FontColor4f(1.0, 1.0f, 1.0f, 1.0f);
 
-	for (iLine=0; iLine < m_nItems; iLine++)
+	if (m_bHorizontal)
 	{
-		Char *pStr = m_pEntries[iLine]; 
-		Int32 iWidth;;
+		Int32 total = 0;
+		const Int32 gap = 24;
+		for (iLine = 0; iLine < m_nItems; iLine++)
+			if (m_pEntries[iLine]) total += FontGetStrWidth(m_pEntries[iLine]);
+		if (m_nItems > 1) total += gap * (m_nItems - 1);
 
-		iWidth = FontGetStrWidth(pStr);
-		
-		if (pStr)
+		Int32 hx = 128 - total / 2;
+		for (iLine = 0; iLine < m_nItems; iLine++)
 		{
-//			FontPuts(vx - iWidth / 2, vy, pStr);
-			FontPuts(vx, vy, pStr);
-
-			if (iLine == m_iSelect)
+			Char *pStr = m_pEntries[iLine];
+			if (pStr)
 			{
-				PolyColor4f(0.0f, 1.0f, 0.0f, 0.5f); 
-				PolyRect(vx-1, vy-1, iWidth + 2, FontGetHeight() + 2);
+				Int32 width = FontGetStrWidth(pStr);
+				FontPuts(hx, vy, pStr);
+				if (iLine == m_iSelect)
+				{
+					PolyColor4f(0.0f, 1.0f, 0.0f, 0.5f);
+					PolyRect(hx-1, vy-1, width + 2, FontGetHeight() + 2);
+				}
+				hx += width + gap;
 			}
 		}
-
 		vy += FontGetHeight() + 2;
+	}
+	else
+	{
+		for (iLine=0; iLine < m_nItems; iLine++)
+		{
+			Char *pStr = m_pEntries[iLine];
+			Int32 iWidth;
+			iWidth = FontGetStrWidth(pStr);
+			if (pStr)
+			{
+				FontPuts(vx, vy, pStr);
+				if (iLine == m_iSelect)
+				{
+					PolyColor4f(0.0f, 1.0f, 0.0f, 0.5f);
+					PolyRect(vx-1, vy-1, iWidth + 2, FontGetHeight() + 2);
+				}
+			}
+			vy += FontGetHeight() + 2;
+		}
 	}
 
 	vy+=FontGetHeight();
@@ -137,23 +187,26 @@ void CMenuScreen::Process()
 
 void CMenuScreen::Input(Uint32 buttons, Uint32 trigger)
 {
-	if (trigger & PAD_UP)
+	(void)buttons;
+	if (m_nItems <= 0)
 	{
-		m_iSelect--;
+		m_iSelect = 0;
+		return;
 	}
-
-	if (trigger & PAD_DOWN)
+	if (m_bHorizontal)
 	{
-		m_iSelect++;
+		if (trigger & PAD_LEFT)  m_iSelect--;
+		if (trigger & PAD_RIGHT) m_iSelect++;
 	}
-
+	else
+	{
+		if (trigger & PAD_UP)   m_iSelect--;
+		if (trigger & PAD_DOWN) m_iSelect++;
+	}
 	if (m_iSelect < 0) m_iSelect = 0;
- 	if (m_iSelect > (m_nItems - 1)) m_iSelect = (m_nItems - 1);
+	if (m_iSelect > (m_nItems - 1)) m_iSelect = (m_nItems - 1);
 
-	if (trigger & (PAD_CIRCLE | PAD_START))
-{
-    SendMessage(1, m_iSelect, m_pUserData);
-}
-
+	if (trigger & (m_bHorizontal ? PAD_CROSS : (PAD_CROSS | PAD_START)))
+		SendMessage(1, m_iSelect, m_pUserData);
 }
 

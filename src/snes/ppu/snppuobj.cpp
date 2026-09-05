@@ -43,15 +43,6 @@ Bool _SnesPPUOBJVisibleX(Uint16 uPosX, Uint8 uWidth)
 	return TRUE;
 }
 
-Bool _SnesPPUOBJTileCountedX(Uint16 uObjectX, Int32 iTileX)
-{
-	/* OBJ X=256 is a hardware quirk: its tiles consume the 34-tile budget
-	   even though no pixel is visible. A tile ending exactly at x=-1 is the
-	   first ordinary off-left tile that counts. */
-	return ((uObjectX & 0x1FF) == 0x100) ||
-	       (iTileX > -8 && iTileX < 256);
-}
-
 
 #if SNDBG_DEEP
 static Uint32 _ObjCountBits8(Uint32 v)
@@ -87,9 +78,9 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 	   (o caso quente). Somente os dois recortes de borda usam o caminho por
 	   pixel, evitando tanto o acesso fora do buffer quanto uma regressao de
 	   desempenho para todos os OBJ da scanline. */
-	/* SNMask usa dois qwords MMI no EE. Alem de ser mais curto que oito
-	   loads/stores escalares, mantem a mascara inteira alinhada no caminho
-	   quente de jogos com muitos OBJ. O recorte seguro continua abaixo. */
+	/* AURORA_REVIVE_A06DD_OBJ_HOTPATH_20260829
+	 * Revive a06dd0719853: usa as operações SNMask/MMI já inline no EE e
+	 * calcula as combinações de prioridade uma única vez por scanline. */
 	if (pWindow)
 		SNMaskCopy(&ObjMask, pWindow);
 	else
@@ -97,9 +88,6 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 	if (pMask)
 		SNMaskOR(&ObjMask, &ObjMask, pMask);
 
-	/* As quatro prioridades usam sempre as mesmas combinacoes dos dois
-	   planos de BG. Calcula-las uma vez com MMI evita repetir OR/AND e o
-	   switch para cada um dos ate 34 tiles OBJ da scanline. */
 	SNMaskOR(&PriorityMask[0], &pLine[SNPPU_BGPLANE_LAYER0],
 		&pLine[SNPPU_BGPLANE_LAYER1]);
 	SNMaskCopy(&PriorityMask[1], &pLine[SNPPU_BGPLANE_LAYER1]);
@@ -110,28 +98,35 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 	while (--nObjLine >= 0)
 	{
 		const SnesRenderObj8T *pObj = pObjLine + nObjLine;
-		Uint32 uOpaque = pObj->uData[SNPPU_BGPLANE_OPAQUE];
+		/* AURORA_SAFE_CODE_PERF_V1_OBJ
+		 * Immutable per-tile metadata kept local in the hot renderer. */
+		const Int32 iPosX = pObj->iPosX;
+		const Uint32 uPri = pObj->uPri;
+		const Uint32 uPal = pObj->uPal;
+		const Uint8 *pObjData = pObj->uData;
+		Uint32 uOpaque = pObjData[SNPPU_BGPLANE_OPAQUE];
 
-		if (!uOpaque || pObj->iPosX <= -8 || pObj->iPosX >= 256)
+		if (!uOpaque || iPosX <= -8 || iPosX >= 256)
 			continue;
+
+		const SNMaskT *pPriorityMask = &PriorityMask[uPri];
 
 #if SNDBG_DEEP
 		g_DbgObjCandidatePixels += _ObjCountBits8(uOpaque);
 #endif
 
-		if (pObj->iPosX >= 0 && pObj->iPosX <= 248)
+		if (iPosX >= 0 && iPosX <= 248)
 		{
-			const SNMaskT *pPriorityMask = &PriorityMask[pObj->uPri];
-			Uint32 uShift = pObj->iPosX & 31;
+			Uint32 uShift = iPosX & 31;
 			Uint32 uInvShift = 32 - uShift;
 			Uint32 uMask0 = uOpaque << uShift;
 			Uint32 uMask1 = uShift ? (uOpaque >> uInvShift) : 0;
 			Uint32 uBlocked0;
 			Uint32 uBlocked1;
 			Uint32 uVisible;
-			Uint8 *pDest8 = pLine8 + pObj->iPosX;
+			Uint8 *pDest8 = pLine8 + iPosX;
 
-			iWord = pObj->iPosX >> 5;
+			iWord = iPosX >> 5;
 			uBlocked0 = ObjMask.uMask32[iWord];
 			uBlocked1 = uMask1 ? ObjMask.uMask32[iWord + 1] : 0;
 
@@ -150,7 +145,7 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 
 			if (pAddSubMask)
 			{
-				if ((bAddSubMask & 1) && ((pObj->uPal | bAddSubMask) & 0x4))
+				if ((bAddSubMask & 1) && ((uPal | bAddSubMask) & 0x4))
 				{
 					pAddSubMask->uMask32[iWord] |= uMask0;
 					if (uMask1)
@@ -171,17 +166,30 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 #if SNDBG_DEEP
 			g_DbgObjDrawnPixels += _ObjCountBits8(uVisible);
 #endif
-			if (uVisible & 0x01) pDest8[0] = pObj->uData[0];
-			if (uVisible & 0x02) pDest8[1] = pObj->uData[1];
-			if (uVisible & 0x04) pDest8[2] = pObj->uData[2];
-			if (uVisible & 0x08) pDest8[3] = pObj->uData[3];
-			if (uVisible & 0x10) pDest8[4] = pObj->uData[4];
-			if (uVisible & 0x20) pDest8[5] = pObj->uData[5];
-			if (uVisible & 0x40) pDest8[6] = pObj->uData[6];
-			if (uVisible & 0x80) pDest8[7] = pObj->uData[7];
+			/* AURORA_V7_OBJ_FULLROW_MEMCPY
+			 * Exact semantic fast path: after all priority/window masks have
+			 * already been resolved, an entirely visible 8-pixel row is just
+			 * the same eight byte stores.  memcpy is alignment-safe on EE and
+			 * avoids eight branches in sprite-heavy scenes (Top Gear). */
+			if (!uVisible)
+				continue;
+			if (uVisible == 0xFF)
+			{
+				memcpy(pDest8, pObjData, 8);
+			}
+			else
+			{
+				if (uVisible & 0x01) pDest8[0] = pObjData[0];
+				if (uVisible & 0x02) pDest8[1] = pObjData[1];
+				if (uVisible & 0x04) pDest8[2] = pObjData[2];
+				if (uVisible & 0x08) pDest8[3] = pObjData[3];
+				if (uVisible & 0x10) pDest8[4] = pObjData[4];
+				if (uVisible & 0x20) pDest8[5] = pObjData[5];
+				if (uVisible & 0x40) pDest8[6] = pObjData[6];
+				if (uVisible & 0x80) pDest8[7] = pObjData[7];
+			}
 		} else
 		{
-			const SNMaskT *pPriorityMask = &PriorityMask[pObj->uPri];
 			Int32 iPixel;
 #if SNDBG_DEEP
 			g_DbgObjClippedTiles++;
@@ -195,7 +203,7 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 				if (!(uOpaque & (1u << iPixel)))
 					continue;
 
-				iX = pObj->iPosX + iPixel;
+				iX = iPosX + iPixel;
 				if ((Uint32)iX >= 256u)
 					continue;
 
@@ -211,13 +219,13 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 
 				if (pAddSubMask)
 				{
-					if ((bAddSubMask & 1) && ((pObj->uPal | bAddSubMask) & 0x4))
+					if ((bAddSubMask & 1) && ((uPal | bAddSubMask) & 0x4))
 						pAddSubMask->uMask32[iWord] |= uBit;
 					else
 						pAddSubMask->uMask32[iWord] &= ~uBit;
 				}
 
-				pLine8[iX] = pObj->uData[iPixel];
+				pLine8[iX] = pObjData[iPixel];
 #if SNDBG_DEEP
 				g_DbgObjDrawnPixels++;
 #endif
@@ -417,46 +425,160 @@ Int32 SnesPPURender::CheckOBJ(Uint8 *pObjList, Int32 iLine)
 
 
 
-void SnesPPURender::UpdateOBJVisibility(Uint8 *pObjY, Uint8 *pObjSize, Int32 iObj, Int32 nObjs)
+/* AURORA_OBJ_LIMIT_V1_2_SCREEN
+ * "Per Screen" is intentionally a performance hack rather than SNES
+ * behavior. It chooses the first N genuinely visible OBJ in the same OAM
+ * traversal order already used by the renderer, then keeps each chosen OBJ
+ * for every scanline it occupies. This avoids vertically sliced sprites. */
+static Bool _SnesPPUOBJScreenLimiterVisibleX(Uint16 uPosX, Uint8 uWidth)
 {
-    memset(m_nObjLine, 0, sizeof(m_nObjLine));
-
-	while (nObjs > 0)
-	{
-		Uint32 uObjY, uObjSize;
-
-		iObj &= 0x7F;
-
-		// get pointer to object
-        uObjSize = pObjSize[iObj];
-		uObjY    = pObjY[iObj];
-
-		if (_SnesPPUOBJVisibleX(m_Objs[iObj].uPosX,
-		                           m_Objs[iObj].uWidth))
-		while (uObjSize > 0)
-        {
-            if (uObjY < SNPPU_MAXLINE)
-            {
-                if (m_nObjLine[uObjY] < SNPPU_MAXOBJ)
-                {
-                    m_ObjLine[uObjY][m_nObjLine[uObjY]] = (Uint8)iObj;
-                    m_nObjLine[uObjY]++;
-                }
-            }
-
-            uObjY++;
-            uObjSize--;
-    		uObjY&= 0xFF;
-        }
-
-		iObj++;
-		nObjs--;
-	}
+	Int32 iX;
+	uPosX &= 0x1FF;
+	iX = (uPosX & 0x100) ? ((Int32)uPosX - 512) : (Int32)uPosX;
+	return iX < 256 && iX > -(Int32)uWidth;
 }
 
+static Bool _SnesPPUOBJScreenLimiterVisibleY(Uint32 uObjY, Uint32 uObjSize)
+{
+	while (uObjSize > 0)
+	{
+		if (uObjY < SNPPU_MAXLINE)
+			return TRUE;
+		uObjY = (uObjY + 1) & 0xFF;
+		uObjSize--;
+	}
+	return FALSE;
+}
 
+void SnesPPURender::UpdateOBJVisibility(Uint8 *pObjY, Uint8 *pObjSize, Int32 iObj, Int32 nObjs)
+{
+	Int32 screenBudget=SNPPURenderGetObjScreenBudget();
+	Bool screenLimited=screenBudget<SNESPPU_OBJ_NUM;
+	Bool trackTiles=SNPPURenderGetObjTileBudget()<SNPPU_MAXOBJCHR;
+	memset(m_nObjLine,0,sizeof(m_nObjLine));
+	/* AURORA_SAFE_HOTPATH_V4: stale pressure is harmless whenever trackTiles is false;
+	   RenderLine8 now short-circuits before consulting it in that case. */
+	if (trackTiles)
+		memset(m_nObjTilePotential,0,sizeof(m_nObjTilePotential));
 
+	/* AURORA_ACCURACY_OAM_FIRSTSPRITE_Y_V1_VIS_20260825
+	 * Snes9x's special priority-rotation case is:
+	 *     OAMPriorityRotation && OAMFlip && (OAMAddr & 1)
+	 *
+	 * Aurora stores the internal OAM address in BYTE phases, therefore
+	 * OAMFlip==1 plus odd word address maps exactly to (oamaddr & 3) == 3.
+	 * In that state the PPU's range evaluation starts at
+	 *     (FirstSprite + scanline) & 127
+	 * independently for each line, before the existing 32-OBJ/34-tile limits.
+	 *
+	 * Keep Aurora's non-hardware per-screen limiter on its established path;
+	 * this branch covers normal hardware behavior and the scanline limiter. */
+	if (!screenLimited)
+	{
+		const SnesPPURegsT *pRegs = m_pPPU->GetRegs();
+		Bool bFirstSpritePlusY =
+			(pRegs->oamaddr.w & 0x8000) != 0 &&
+			(pRegs->oamaddr.w & 3) == 3;
 
+		if (bFirstSpritePlusY)
+		{
+			Int32 baseFirst = iObj & 0x7F;
+
+			for (Int32 line = 0; line < SNPPU_MAXLINE; line++)
+			{
+				Int32 obj = (baseFirst + line) & 0x7F;
+				Int32 left = nObjs;
+
+				while (left > 0 && m_nObjLine[line] < SNPPU_MAXOBJ)
+				{
+					Uint32 relY =
+						((Uint32)line - (Uint32)pObjY[obj]) & 0xFF;
+
+					if (relY < pObjSize[obj] &&
+					    _SnesPPUOBJVisibleX(m_Objs[obj].uPosX,
+					                           m_Objs[obj].uWidth))
+					{
+						m_ObjLine[line][m_nObjLine[line]++] = (Uint8)obj;
+
+						if (trackTiles)
+						{
+							Int32 x = (m_Objs[obj].uPosX & 0x100)
+								? ((Int32)(m_Objs[obj].uPosX & 0x1FF) - 512)
+								: (Int32)(m_Objs[obj].uPosX & 0x1FF);
+							Int32 counted = 0;
+
+							for (Int32 t = 0;
+							     t < (m_Objs[obj].uWidth >> 3); t++)
+							{
+								if (_SnesPPUOBJTileCountedX(
+									m_Objs[obj].uPosX, x + (t << 3)))
+									counted++;
+							}
+							m_nObjTilePotential[line] += (Uint16)counted;
+						}
+					}
+
+					obj = (obj + 1) & 0x7F;
+					left--;
+				}
+			}
+			return;
+		}
+	}
+
+	if (!screenLimited && !trackTiles)
+	{
+		while (nObjs>0)
+		{
+			Uint32 y,h; iObj&=0x7F; h=pObjSize[iObj]; y=pObjY[iObj];
+			if (_SnesPPUOBJVisibleX(m_Objs[iObj].uPosX,m_Objs[iObj].uWidth))
+				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y++; h--; }
+			iObj++; nObjs--;
+		}
+		return;
+	}
+	if (!screenLimited)
+	{
+		while (nObjs>0)
+		{
+			Uint32 y,h; Int32 counted=0; iObj&=0x7F; h=pObjSize[iObj]; y=pObjY[iObj];
+			if (_SnesPPUOBJVisibleX(m_Objs[iObj].uPosX,m_Objs[iObj].uWidth))
+			{
+				Int32 x=(m_Objs[iObj].uPosX&0x100)?((Int32)(m_Objs[iObj].uPosX&0x1FF)-512):(Int32)(m_Objs[iObj].uPosX&0x1FF);
+				for (Int32 t=0;t<(m_Objs[iObj].uWidth>>3);t++) if (_SnesPPUOBJTileCountedX(m_Objs[iObj].uPosX,x+(t<<3))) counted++;
+				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) { m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; m_nObjTilePotential[y]+=(Uint16)counted; } y++; h--; }
+			}
+			iObj++; nObjs--;
+		}
+		return;
+	}
+	{
+		Uint8 candidates[SNESPPU_OBJ_NUM],selected[SNESPPU_OBJ_NUM]; Int32 nc=0,so=iObj,sn=nObjs,io=iObj,nn=nObjs;
+		memset(selected,0,sizeof(selected));
+		while (nn>0)
+		{
+			Uint32 y,h; Bool keep; io&=0x7F; h=pObjSize[io]; y=pObjY[io];
+			keep=_SnesPPUOBJVisibleX(m_Objs[io].uPosX,m_Objs[io].uWidth) &&
+			     _SnesPPUOBJScreenLimiterVisibleX(m_Objs[io].uPosX,m_Objs[io].uWidth) &&
+			     _SnesPPUOBJScreenLimiterVisibleY(y,h);
+			if (keep && nc<SNESPPU_OBJ_NUM) candidates[nc++]=(Uint8)io;
+			io++; nn--;
+		}
+		if (nc)
+		{
+			Int32 keep=nc<screenBudget?nc:screenBudget,start=0;
+			if (nc>screenBudget) start=(Int32)(((g_SnesObjLimitFramePhase%(Uint32)nc)*(Uint32)screenBudget)%(Uint32)nc);
+			for (Int32 i=0;i<keep;i++) selected[candidates[(start+i)%nc]]=1;
+		}
+		iObj=so; nObjs=sn;
+		while (nObjs>0)
+		{
+			Uint32 y,h; iObj&=0x7F; h=pObjSize[iObj]; y=pObjY[iObj];
+			if (selected[iObj]) while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y++; h--; }
+			iObj++; nObjs--;
+		}
+	}
+}
 
 
 void SnesPPURender::UpdateOBJ(Uint8 *pObjY, Uint8 *pObjSize)

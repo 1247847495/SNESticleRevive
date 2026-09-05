@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <sifrpc.h>
 #include <loadfile.h>
+#include <elf-loader.h>
 #include <kernel.h>
 #include <iopcontrol.h>
 #include <sbv_patches.h>
@@ -28,6 +29,7 @@
 #include "types.h"
 #include "console.h"
 #include "mainloop.h"
+#include "mainloop_smb.h" /* AURORA_RESET_SMB_V1_20260827 */
 
 extern "C" {
 #include "excepHandler.h"
@@ -35,11 +37,11 @@ extern "C" {
 #include "hw.h"
 };
 
-/* Optional storage is brought up on demand after the menu is visible.
-   embedded_irx.cpp still owns the pinned USB BDM and streaming CDFS stacks,
-   but main() must not synchronously start either one before GS init: a module
-   _start() that waits forever on one hardware revision would otherwise leave
-   an OPL-launched ELF on the loader's last black/white background. */
+/* USB is now brought up by UsbBdmLoadEmbeddedIrx() (see
+   embedded_irx.cpp): we embed a pinned BDM stack (FreeUsbd/usbd_mini +
+   bdm + bdmfs_fatfs + usbmass_bd) instead of inheriting whichever usbd
+   happens to be installed in the builder's PS2SDK.  Internal HDD support
+   stays on its separate lazy path. */
 
 /* DLog: writes to EE SIO TX FIFO (defined in modules/sjpcm/sjpcm_rpc.c).
    Plain printf on the EE never reaches PCSX2/NetherSX2's emulator log
@@ -103,7 +105,7 @@ void MainSetBootDir(const char *pPath)
 	len = strlen(_Main_BootDir);
 
 	/* Keep everything through the final device/path separator.  A launcher
-	   that only supplies "SNESticle.elf" gives us no directory information;
+	   that only supplies "SNESticle_Aurora.elf" gives us no directory information;
 	   host: is the only safe fallback and is also what ps2link/PCSX2 expose
 	   for a directly loaded ELF. */
 	for (i = len; i > 0; i--)
@@ -124,6 +126,111 @@ void MainSetBootDir(const char *pPath)
 	{
 		_Main_BootDir[keep] = 0;
 	}
+}
+
+/* AURORA_RESET_SMB_V1_20260827
+ *
+ * A launcher-provided smb0:/smb1: path names the launcher's SMB mount.
+ * Aurora resets the IOP during startup, so that mount no longer exists when
+ * "Reset emulator" is selected later.
+ *
+ * Aurora's own ps2smb stack exposes the connected share as "smb:". Reconnect
+ * it first, then preserve only the path portion after the old device prefix.
+ */
+static int MainPrepareResetBootPath(const char *bootPath,
+                                    char *resolvedPath,
+                                    size_t resolvedPathSize)
+{
+    const char *suffix = NULL;
+
+    if (!bootPath || !bootPath[0] || !resolvedPath || resolvedPathSize == 0)
+        return 0;
+
+    if (!strncmp(bootPath, "smb:", 4) ||
+        !strncmp(bootPath, "SMB:", 4))
+    {
+        suffix = bootPath + 4;
+    }
+    else if (!strncmp(bootPath, "smb0:", 5) ||
+             !strncmp(bootPath, "SMB0:", 5) ||
+             !strncmp(bootPath, "smb1:", 5) ||
+             !strncmp(bootPath, "SMB1:", 5))
+    {
+        suffix = bootPath + 5;
+    }
+
+    if (!suffix)
+    {
+        if (strlen(bootPath) >= resolvedPathSize)
+            return 0;
+        strcpy(resolvedPath, bootPath);
+        return 1;
+    }
+
+    DLog("[reset] SMB boot detected: %s", bootPath);
+    DLog("[reset] reconnecting Aurora SMB mount");
+
+    /* AURORA_FCEUMM_FDS_V5_CI_SMB_UPSTREAM_PERF_20260827
+     * SMB support defaults OFF. V1 called SmbEnsureMounted() directly, which
+     * therefore returned -1 before loading SMB.CNF or touching the network.
+     * A reset of an SMB-launched ELF is itself an explicit request to use SMB:
+     * enable the feature and force a fresh share/auth session rather than
+     * trusting a stale s_mounted flag. */
+    SmbSupportSetEnabled(1);
+    SmbDisconnect();
+
+    if (SmbEnsureMounted() < 0)
+    {
+        DLog("[reset] SMB reconnect failed: error=%d status=%s",
+             SmbGetLastError(), SmbGetStatusText());
+        return 0;
+    }
+
+    if (snprintf(resolvedPath, resolvedPathSize,
+                 "smb:%s", suffix) >= (int)resolvedPathSize)
+    {
+        DLog("[reset] normalized SMB boot path is too long");
+        return 0;
+    }
+
+    DLog("[reset] SMB reconnect OK via %s; normalized path: %s",
+         SmbGetConfigPath()[0] ? SmbGetConfigPath() : "(unknown config)",
+         resolvedPath);
+    return 1; /* AURORA_FCEUMM_FDS_V5_CI_SMB_UPSTREAM_PERF_20260827 */
+}
+
+void MainResetEmulator(void)
+{
+    const char *pBootPath = MainGetBootPath();
+    char resolvedBootPath[256];
+    int ret;
+
+    if (!pBootPath || !pBootPath[0])
+        return;
+
+    if (!MainPrepareResetBootPath(
+            pBootPath, resolvedBootPath, sizeof(resolvedBootPath)))
+    {
+        DLog("[reset] could not prepare boot path: %s", pBootPath);
+        return;
+    }
+
+    /*
+     * Do not use LoadExecPS2 here. It goes through EELOAD and resets
+     * the IOP before loading the target, losing non-ROM filesystem
+     * drivers such as USB/BDM/SMB.
+     *
+     * PS2SDK's elf-loader first installs a small loader below 0x00100000.
+     * The current filesystem stack remains alive until the target ELF has
+     * been loaded into EE RAM.
+     */
+    DLog("[reset] reloading ELF: %s", resolvedBootPath);
+
+    ret = LoadELFFromFile(resolvedBootPath, 0, NULL);
+
+    /* Success transfers execution and never normally gets here. */
+    DLog("[reset] LoadELFFromFile failed: %d (%s)",
+         ret, resolvedBootPath);
 }
 
 /* Your program's main entry point */
@@ -182,13 +289,12 @@ int main(int argc, char **argv)
 	sbv_patch_disable_prefix_check();
 	DLog("[boot] sbv patches applied");
 
-	/* Bring up the modern PS2DEV filesystem base: iomanX, fileXio,
-	   poweroff and mcman/mcserv.  Once this is done, newlib
+	/* Bring up the modern PS2DEV filesystem stack: iomanX, fileXio,
+	   poweroff, mcman/mcserv, cdfs, usb.  Once this is done, newlib
 	   stdio (fopen/fread/fwrite/fclose/mkdir/opendir) routes through
 	   iomanX, so paths like "mc0:/SNESticle/<rom>.srm",
 	   "cdfs:/ROMS/foo.sfc", "mass:/bar/baz" all work as standard POSIX
-	   file paths from the EE side after their optional device driver has
-	   been loaded.
+	   file paths from the EE side.
 
 	   The legacy rom0:FILEIO RPC was the original I/O path in this
 	   codebase (fioOpen / fioDopen / fioRead).  It silently dropped a
@@ -247,14 +353,44 @@ int main(int argc, char **argv)
 	     (void *)_libcglue_fdman_path_ops,
 	     (void *)&__fileXio_fdman_path_ops);
 
-	/* Memory card, USB and CDFS deliberately do not start here.  The memory
-	   card stack starts inside MainLoopInit after the boot screen exists;
-	   USB and CDFS are loaded by the browser on the first explicit
-	   mass:/cdfs: access.  State settings
-	   and BGM discovery also check the loaded-state getters before touching
-	   those devices.  This keeps synchronous SifExecModuleBuffer and CDVD RPC
-	   waits out of the invisible pre-video boot path used by OPL Apps and ISO
-	   launches on real Fat/Slim consoles. */
+	/* Memory-card IRX stack (sio2man + mcman + mcserv) is now loaded
+	   from the buffers embedded in this ELF rather than from
+	   ps2_drivers' init_memcard_driver(true), which embeds the same
+	   three IRXs in libps2_drivers.a.  Doing the load explicitly here
+	   pins the IRX versions to whatever the in-tree PS2SDK supplies,
+	   makes the load order visible in source, and matches the pattern
+	   used by picodrive / OPL / hugorsgarcia/PS2SNESticle. */
+	DLog("[boot] MemCardLoadEmbeddedIrx: enter");
+	{
+		int mcret = MemCardLoadEmbeddedIrx();
+		DLog("[boot] MemCardLoadEmbeddedIrx: done (ret=%d)", mcret);
+		(void)mcret;
+	}
+
+	DLog("[boot] UsbBdmLoadEmbeddedIrx: enter");
+	/* USB via stack BDM fixada (FreeUsbd mini + FAT/exFAT/MBR/GPT),
+	   no lugar do init_usb_driver() do ps2_drivers.  Nao usa dev9, entao
+	   nao corre o risco de travar boot do HD interno. */
+	UsbBdmLoadEmbeddedIrx();
+	DLog("[boot] UsbBdmLoadEmbeddedIrx: done");
+
+	DLog("[boot] CdfsLoadEmbeddedIrx: enter");
+	{
+		int cdfsret = CdfsLoadEmbeddedIrx();
+		DLog("[boot] CdfsLoadEmbeddedIrx: done (ret=%d)", cdfsret);
+		(void)cdfsret;
+	}
+
+	/* Inicia o cdvd SEM checar disco (SCECdINoD), nao SCECdINIT.  No boot
+	   por DISCO num PS2 real, o drive ainda esta assentando/girando e o
+	   SCECdINIT (que espera o disco) pode TRAVAR -> tela preta (so' no
+	   hardware; no emulador o drive ja' esta pronto).  SCECdINoD inicia o
+	   subsistema sem o check, evitando o lockup -- mesma defesa do
+	   wLaunchELF (loadCdModules).  O tipo do disco e' consultado depois,
+	   quando o browser entra em cdfs: (drive ja' pronto). */
+	DLog("[boot] sceCdInit(INoD): enter");
+	sceCdInit(SCECdINoD);
+	DLog("[boot] sceCdInit(INoD): done (diskType=%d)", sceCdGetDiskType());
 
 	/* Probes de boot DESATIVADOS (#if 0): faziam opendir/stat/fileXioDopen
 	   em cdfs: durante a inicializacao (codigo de debug -- os DLog ja'

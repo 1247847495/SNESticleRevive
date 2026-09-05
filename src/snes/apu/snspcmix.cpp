@@ -104,9 +104,21 @@ static Uint32 _SNSpcDsp_BentLineMS[32]=
 static Uint32 _SNSpcDsp_NoiseFreq[32]=
 {
 	0,	16,	21,	25,	31,	42,	50,	63,	83,	100,	
-	125,	107,	200,	250,	333,	400,	500,	667,	800,	1000,	1300,
+	125,	167,	200,	250,	333,	400,	500,	667,	800,	1000,	1300,
 	1600,	2000,	2700,	3200,	4000,	5300,	6400,	8000,	10700,	16000,	32000
 };
+
+
+
+/* AURORA_AUDIO_NATIVE_PHASE_V3
+ * Exact host-side fast path. No DSP clock, pitch or interpolation rule changes. */
+static _INLINE Int32 _SNSpcDspPhaseInc(Uint32 uPitch, Int32 nSampleRate)
+{
+	if (nSampleRate == SNSPCDSP_SAMPLERATE)
+		return (Int32)(uPitch << 4);
+
+	return (Int32)((uPitch * SNSPCDSP_SAMPLERATE / nSampleRate) << 4);
+}
 
 
 
@@ -231,15 +243,21 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 	}
 	#endif
 
+	/* AURORA_SAFE_CODE_PERF_V1_MIX
+	 * The synchronous envelope batch does not call back into the DSP. Keep
+	 * the register bytes used by setup local, but only for an active voice. */
+	const Uint8 uAdsr1 = pRegs->adsr1;
+	const Uint8 uGain  = pRegs->gain;
+
 	//
 	// initialze envelope state based on register settings
 	//
-	if (!(pRegs->adsr1 & 0x80))
+	if (!(uAdsr1 & 0x80))
 	{
 		SNSpcEnvStateE eNewState = pChannel->eEnvState;
 		
 		#if !SNSPCDSP_MIXSILENCE
-		if (!pRegs->gain)
+		if (!uGain)
 		{
 			return 0;
 		}
@@ -248,7 +266,7 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 		if (pChannel->eEnvState!=SNSPCDSP_ENVSTATE_RELEASE && pChannel->eEnvState!=SNSPCDSP_ENVSTATE_SILENCE)
 		{
 			// enforce gain modes
-			switch (pRegs->gain >> 5)
+			switch (uGain >> 5)
 			{
 			case 0x6:
 				eNewState = SNSPCDSP_ENVSTATE_INCREASELINEAR;
@@ -283,6 +301,9 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 #endif
 	
 
+	const Uint8 uAdsr2 = pRegs->adsr2;
+	SNSpcEnvStateE eEnvState = pChannel->eEnvState;
+
 	PROF_ENTER("SNSpcDspOutputEnvelope");
 
 	//
@@ -292,15 +313,14 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 	nEnvCount = pChannel->nEnvCount;
 	while (nSamples > 0)
 	{
-		// see if enough time elapsed between envelope updates
 		if (nEnvCount <= 0)
 		{
 			// update envelope
-			switch (pChannel->eEnvState)
+			switch (eEnvState)
 			{
 			case SNSPCDSP_ENVSTATE_ATTACK:
 				// get attack rate
-				nEnvRate = m_AttackTicks[pRegs->adsr1&0xF];
+				nEnvRate = m_AttackTicks[uAdsr1&0xF];
 				// update envelope
 				iEnvelope += SNSPCDSP_ENVELOPE_MAX >> 6;		// increment by 1/64
 
@@ -310,15 +330,15 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 					iEnvelope = SNSPCDSP_ENVELOPE_MAX;
 
 					// begin decay
-					pChannel->eEnvState = SNSPCDSP_ENVSTATE_DECAY;
+					eEnvState = SNSPCDSP_ENVSTATE_DECAY;
 				}
 				break;
 
 			case SNSPCDSP_ENVSTATE_DECAY:
 				// get decay rate
-				nEnvRate = m_DecayTicks[(pRegs->adsr1>>4) & 7];
+				nEnvRate = m_DecayTicks[(uAdsr1>>4) & 7];
 				// get sustain level
-				iEnvTarget = ((pRegs->adsr2>>5) + 1) << (SNSPCDSP_ENVELOPE_BITS - 3);
+				iEnvTarget = ((uAdsr2>>5) + 1) << (SNSPCDSP_ENVELOPE_BITS - 3);
 
 				// update envelope
 				iEnvelope -= iEnvelope >> 8;           // decrement by x / 256
@@ -328,13 +348,13 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 				{
 					iEnvelope = iEnvTarget;
 					// begin sustain
-					pChannel->eEnvState = SNSPCDSP_ENVSTATE_SUSTAIN;
+					eEnvState = SNSPCDSP_ENVSTATE_SUSTAIN;
 				}
 				break;
 
 			case SNSPCDSP_ENVSTATE_SUSTAIN:
 				// get sustain rate
-				nEnvRate = m_SustainTicks[pRegs->adsr2&0x1F];
+				nEnvRate = m_SustainTicks[uAdsr2&0x1F];
 				// update envelope
 				iEnvelope -= iEnvelope >> 8;					// decrement by x / 256
 
@@ -353,13 +373,13 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 				if (iEnvelope <= 0)
 				{
 					iEnvelope = 0;
-					pChannel->eEnvState = SNSPCDSP_ENVSTATE_SILENCE;
+					eEnvState = SNSPCDSP_ENVSTATE_SILENCE;
 				}
 				break;
 
 			case SNSPCDSP_ENVSTATE_DECREASELINEAR:
 				// get rate
-				nEnvRate = m_LinearTicks[pRegs->gain & 0x1F];
+				nEnvRate = m_LinearTicks[uGain & 0x1F];
 
 				iEnvelope -= SNSPCDSP_ENVELOPE_MAX >> 6;		// decrement by 1/64
 				if (iEnvelope <= 0)
@@ -370,7 +390,7 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 
 			case SNSPCDSP_ENVSTATE_DECREASEEXP:
 				// get sustain rate
-				nEnvRate = m_SustainTicks[pRegs->gain & 0x1F];
+				nEnvRate = m_SustainTicks[uGain & 0x1F];
 				// update envelope
 				iEnvelope -= iEnvelope >> 8;					// decrement by x / 256
 
@@ -383,7 +403,7 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 
 			case SNSPCDSP_ENVSTATE_INCREASELINEAR:
 				// get rate
-				nEnvRate = m_LinearTicks[pRegs->gain & 0x1F];
+				nEnvRate = m_LinearTicks[uGain & 0x1F];
 				// update envelope
 				iEnvelope += SNSPCDSP_ENVELOPE_MAX >> 6;		// increment by 1/64
 
@@ -396,7 +416,7 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 
 			case SNSPCDSP_ENVSTATE_INCREASEBENTLINE:
 				// get rate
-				nEnvRate = m_BentLineTicks[pRegs->gain & 0x1F];
+				nEnvRate = m_BentLineTicks[uGain & 0x1F];
 
 				if (iEnvelope >= (SNSPCDSP_ENVELOPE_MAX * 3 / 4 ))
 				{
@@ -416,7 +436,7 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 				break;
 
 			case SNSPCDSP_ENVSTATE_DIRECT:
-				iEnvelope = pRegs->gain << (SNSPCDSP_ENVELOPE_BITS - 7);
+				iEnvelope = uGain << (SNSPCDSP_ENVELOPE_BITS - 7);
 				nEnvCount = 0x10000000;
 				nEnvRate  = 0;
 				break;
@@ -433,16 +453,38 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 			nEnvCount += nEnvRate;
 		}
 
-		// write envelope
-		*pOut = iEnvelope >> (SNSPCDSP_ENVELOPE_BITS - 7);
-		pOut++;
 
-		// next sample
-		nEnvCount-= 1 << 16;
-		nSamples--;
+		/* AURORA_AUDIO_ENVELOPE_RUNS_V3
+		 * nEnvCount is 16.16 samples-until-update. The envelope cannot
+		 * change while it remains positive, so emit that constant run
+		 * together. ceil(count / 65536) reproduces the old <= 0 test
+		 * exactly; a non-positive post-update count still emits the one
+		 * current sample before the next update, just like the old loop. */
+		Int32 nRun = (nEnvCount > 0)
+			? ((nEnvCount + 0xFFFF) >> 16) : 1;
+		if (nRun > nSamples)
+			nRun = nSamples;
+
+		Uint8 uEnv = (Uint8)(iEnvelope >>
+			(SNSPCDSP_ENVELOPE_BITS - 7));
+		if (nRun >= 8)
+		{
+			memset(pOut, uEnv, (size_t)nRun);
+		}
+		else
+		{
+			Int32 i;
+			for (i = 0; i < nRun; ++i)
+				pOut[i] = uEnv;
+		}
+
+		pOut += nRun;
+		nEnvCount -= nRun << 16;
+		nSamples -= nRun;
 	}
 
 	// cleanup
+	pChannel->eEnvState = eEnvState;
 	pChannel->iEnvelope = iEnvelope;
 	pChannel->nEnvCount = nEnvCount;
 
@@ -450,7 +492,7 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 	pChannel->envx = iEnvelope >> (SNSPCDSP_ENVELOPE_BITS - 7);
 
 	// voice ended?
-	if (pChannel->eEnvState == SNSPCDSP_ENVSTATE_SILENCE)
+	if (eEnvState == SNSPCDSP_ENVSTATE_SILENCE)
 	{
 		// signal end of channel
 		pChannel->endx = TRUE;
@@ -488,7 +530,12 @@ Int32 SNSpcDspMixFull::OutputNoise(Int16 *pOut, Uint16 *pFrac, Int32 nSamples, I
 	// get noise frequency
 	uNoiseFreq = _SNSpcDsp_NoiseFreq[m_pDsp->GetReg(SNSPCDSP_REG_FLG) & 0x1F];
 
-	iNoisePhaseInc = 0x10000 * uNoiseFreq / nSampleRate;
+	/* AURORA_AUDIO_NATIVE_NOISE_V3
+	 * 65536/32000 reduces exactly to 256/125. */
+	if (nSampleRate == SNSPCDSP_SAMPLERATE)
+		iNoisePhaseInc = (Int32)((uNoiseFreq << 8) / 125u);
+	else
+		iNoisePhaseInc = 0x10000 * uNoiseFreq / nSampleRate;
 
 	while (nSamples > 0)
 	{
@@ -606,8 +653,7 @@ Int32 SNSpcDspMixFull::OutputSample(Int32 iChannel, Int16 *pOut, Uint16 *pFrac, 
 	iPhase = pChannel->iPhase;
 	
 	// output at correct pitch based on sample rate
-	iPhaseInc = uPitch * SNSPCDSP_SAMPLERATE / nSampleRate; 
-	iPhaseInc <<= 4;
+	iPhaseInc = _SNSpcDspPhaseInc(uPitch, nSampleRate);
 
 
 	while (nSamples > 0)
@@ -656,6 +702,105 @@ Int32 SNSpcDspMixFull::OutputSample(Int32 iChannel, Int16 *pOut, Uint16 *pFrac, 
 	pChannel->iPhase = iPhase;
 	PROF_LEAVE("SNSpcDspOutputSample");
 	return 1;
+}
+
+
+/* AURORA_SNES_PMON_NOISE_V3_20260822
+ *
+ * PMON used to call the same OutputSample() path as a normal voice, making
+ * pitch modulation a no-op. Keep ordinary voices untouched and use this path
+ * only when the PMON bit is set for the current voice.
+ */
+Int32 SNSpcDspMixFull::OutputSampleModulated(
+        Int32 iChannel, Int16 *pOut, Uint16 *pFrac,
+        const Int16 *pPitchMod, Int32 nSamples, Int32 nSampleRate)
+{
+        SNSpcChannelT *pChannel = GetChannel(iChannel);
+        const SNSpcVoiceRegsT *pRegs = m_pDsp->GetVoiceRegs(iChannel);
+        Int32 iPhase;
+        Uint32 uPitch;
+        Int16 *pBlockData;
+
+#if !SNSPCDSP_MIXSILENCE
+        if (pChannel->uBlockAddr == 0)
+        {
+                pChannel->uOldBlockAddr = pChannel->uBlockAddr;
+                return 0;
+        }
+#endif
+
+        PROF_ENTER("SNSpcDspOutputSamplePMON");
+        pBlockData = pChannel->BlockData[1];
+
+        if (pChannel->uBlockAddr != pChannel->uOldBlockAddr)
+        {
+                pBlockData[14] = pBlockData[(pChannel->iPhase >> 16) + 0];
+                pBlockData[15] = pBlockData[(pChannel->iPhase >> 16) + 1];
+                pChannel->iPhase &= 0xFFFF;
+                pChannel->iPhase |= 14 << 16;
+        }
+
+        uPitch = pRegs->pitch_lo | (pRegs->pitch_hi << 8);
+        uPitch &= 0x3FFF;
+        iPhase = pChannel->iPhase;
+
+        while (nSamples > 0)
+        {
+                Int16 *pSample;
+                Int32 iSample0, iSample1;
+                Int32 iModPitch;
+
+                if (iPhase >= (14 << 16))
+                {
+                        FetchBlock(iChannel);
+                        iPhase -= (16 << 16);
+                }
+
+                pSample = &pBlockData[iPhase >> 16];
+                iSample0 = pSample[0];
+                iSample1 = pSample[1];
+                pFrac[0] = (Uint16)iPhase;
+                pFrac++;
+                pOut[0] = iSample0;
+                pOut[1] = iSample1;
+                pOut += 2;
+
+                /* Reference S-DSP relation:
+                 * pitch += ((previous_output >> 5) * pitch) >> 10.
+                 * The base pitch is 14-bit, but the modulated result is not
+                 * masked back to 0x3fff. */
+                iModPitch = (Int32)uPitch;
+                if (pPitchMod)
+                {
+                        iModPitch +=
+                                (((Int32)(*pPitchMod) >> 5) *
+                                 (Int32)uPitch) >> 10;
+                        pPitchMod++;
+                }
+
+                if (iModPitch < 0)
+                        iModPitch = 0;
+                if (iModPitch > 0x7FFF)
+                        iModPitch = 0x7FFF;
+
+                iPhase += _SNSpcDspPhaseInc(
+                        (Uint32)iModPitch, nSampleRate);
+                nSamples--;
+        }
+
+        if (pChannel->uBlockAddr == 0)
+        {
+                pChannel->eEnvState = SNSPCDSP_ENVSTATE_SILENCE;
+                pChannel->endx = TRUE;
+        }
+
+        /* Preserve Aurora's pre-v2 externally visible OUTX approximation.
+         * PMON uses its own transient per-sample data below. */
+        pChannel->outx = pChannel->envx;
+        pChannel->uOldBlockAddr = pChannel->uBlockAddr;
+        pChannel->iPhase = iPhase;
+        PROF_LEAVE("SNSpcDspOutputSamplePMON");
+        return 1;
 }
 
 
@@ -1223,14 +1368,45 @@ struct SNSpcDspDataT
 	Uint16 FracData[SNSPCDSP_BUFFERSIZE] _ALIGN(16);
 	Uint8 EnvData[SNSPCDSP_BUFFERSIZE] _ALIGN(16);
 
+	/* AURORA_SNES_PMON_NOISE_V3_20260822
+	 * Two transient buffers avoid read/write overlap between adjacent voices. */
+	Int16 PitchModA[SNSPCDSP_BUFFERSIZE] _ALIGN(16);
+	Int16 PitchModB[SNSPCDSP_BUFFERSIZE] _ALIGN(16);
+
 	SNSpcMixSampleT  Main[2][SNSPCDSP_BUFFERSIZE] _ALIGN(16);
-	SNSpcEchoSampleT Echo[2][SNSPCDSP_BUFFERSIZE] _ALIGN(16);
+    SNSpcEchoSampleT Echo[2][SNSPCDSP_BUFFERSIZE] _ALIGN(16);
 };
 
-#if CODE_PLATFORM == CODE_PS2
-typedef char SNSpcScratchLookupLayoutCheck[
-	(sizeof(SNSpcDspDataT) <= PS2MEM_SNES_LOOKUP_OFFSET) ? 1 : -1];
-#endif
+
+/* Previous voice output for PMON: interpolated sample * envelope,
+ * before per-channel L/R volume. This mirrors Aurora's existing linear
+ * interpolation so modulation follows the sample Aurora itself renders. */
+static void _SNSpcBuildPitchModOutput(
+        Int16 *pOut, const Int16 *pIn, const Uint8 *pEnvelope,
+        const Uint16 *pFrac, Int32 nSamples)
+{
+        while (nSamples > 0)
+        {
+                Int32 iFrac0 = pFrac[0] >> 1;
+                Int32 iFrac1 = iFrac0 ^ 0x7FFF;
+                Int32 iSample;
+
+                iSample = pIn[0] * iFrac1 + pIn[1] * iFrac0;
+                iSample >>= 15;
+                iSample *= *pEnvelope;
+                iSample >>= 7;
+
+                if (iSample > 0x7FFF) iSample = 0x7FFF;
+                if (iSample < -0x8000) iSample = -0x8000;
+                iSample &= ~1;
+                *pOut++ = (Int16)iSample;
+
+                pIn += 2;
+                pEnvelope++;
+                pFrac++;
+                nSamples--;
+        }
+}
 
 
 #if 0
@@ -1271,7 +1447,9 @@ void SNSpcDspMixFull::FilterEcho(Int16 *pLeftEcho, Int16 *pRightEcho, Int32 nSam
 
 	// calculate echo buffer size based on sample rate
 	uEchoSize = (m_pDsp->GetReg(SNSPCDSP_REG_EDL)&0xF) * 512 * 2;
-	uEchoSize = uEchoSize * nSampleRate / SNSPCDSP_SAMPLERATE;
+	/* AURORA_AUDIO_NATIVE_ECHO_V3: at 32 kHz scaling is exactly 1:1. */
+	if (nSampleRate != SNSPCDSP_SAMPLERATE)
+		uEchoSize = uEchoSize * nSampleRate / SNSPCDSP_SAMPLERATE;
 	if (uEchoSize > SNSPCDSP_ECHOBUFFER_SIZE) uEchoSize = SNSPCDSP_ECHOBUFFER_SIZE;
 
 	// set filter coefficients
@@ -1358,6 +1536,9 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 	{
 		Int32 iChannel;
 		Uint8 uEchoEnable;
+		Uint8 uPitchMod;
+		Int16 *pPitchModPrev = pData->PitchModA;
+		Int16 *pPitchModNext = pData->PitchModB;
 
 		// dequeue write queue up to current cycle time
 		m_pDsp->Sync(uCycle);
@@ -1365,6 +1546,9 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 		// get echo enable bits
 		uEchoEnable = m_pDsp->GetReg(SNSPCDSP_REG_EON);
 		if (m_pDsp->GetReg(SNSPCDSP_REG_FLG)&0x20) uEchoEnable=0;
+
+		/* Voice 0 cannot be pitch-modulated on real hardware. */
+		uPitchMod = m_pDsp->GetReg(SNSPCDSP_REG_PMON) & 0xFE;
 
 		// dont update more than samples-per-update at a time
 		nSamples = nTotalSamples;
@@ -1389,6 +1573,14 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 		{
 			for (iChannel=0; iChannel < SNSPCDSP_CHANNEL_NUM; iChannel++)
 			{
+				const Bool bFeedsPitchMod =
+					(iChannel + 1 < SNSPCDSP_CHANNEL_NUM) &&
+					(uPitchMod & (1 << (iChannel + 1)));
+
+				if (bFeedsPitchMod)
+					memset(pPitchModNext, 0,
+					       (size_t)nSamples * sizeof(*pPitchModNext));
+
 				#if CODE_DEBUG
 				if (_ChMask & (1<<iChannel))
 				#endif
@@ -1403,17 +1595,19 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 					pSampleData = pData->iSampleData;
 					pFracData   = pData->FracData;
 
-					if (m_pDsp->GetReg(SNSPCDSP_REG_PMON) & (1<<iChannel))
+					if (iChannel > 0 && (uPitchMod & (1 << iChannel)))
 					{
-						// output sample data (pitch modulation!)
-						bMix = OutputSample(iChannel, pSampleData, pFracData, nSamples, nSampleRate);
+						bMix = OutputSampleModulated(
+							iChannel, pSampleData, pFracData,
+							pPitchModPrev, nSamples, nSampleRate);
 						#if CODE_DEBUG
 						//ConDebug("PitchModulation %d\n", iChannel);
 						#endif
 					} else
 					{
-						// output sample data
-						bMix = OutputSample(iChannel, pSampleData, pFracData, nSamples, nSampleRate);
+						bMix = OutputSample(
+							iChannel, pSampleData, pFracData,
+							nSamples, nSampleRate);
 					}
 
 					if (bMix)
@@ -1426,6 +1620,13 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 							// use pre-generated noise channel data instead of pcm data
 							pSampleData = m_iNoiseSample;
 							pFracData   = m_iNoiseFrac;
+						}
+
+						if (bFeedsPitchMod)
+						{
+							_SNSpcBuildPitchModOutput(
+								pPitchModNext, pSampleData,
+								pData->EnvData, pFracData, nSamples);
 						}
 
 						//
@@ -1456,6 +1657,12 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 
 						PROF_LEAVE("SNSpcDspMixStereo");
 					}
+				}
+
+				{
+					Int16 *pSwap = pPitchModPrev;
+					pPitchModPrev = pPitchModNext;
+					pPitchModNext = pSwap;
 				}
 			}
 
@@ -1559,8 +1766,7 @@ Int32 SNSpcDspMixSilent::OutputSample(Int32 iChannel, Int32 nSamples, Int32 nSam
 	iPhase = pChannel->iPhase;
 	
 	// output at correct pitch based on sample rate
-	iPhaseInc = uPitch * SNSPCDSP_SAMPLERATE / nSampleRate; 
-	iPhaseInc <<= 4;
+	iPhaseInc = _SNSpcDspPhaseInc(uPitch, nSampleRate);
 
 	while (nSamples > 0)
 	{

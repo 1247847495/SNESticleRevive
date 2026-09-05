@@ -229,61 +229,30 @@ int main() {
                (abs(px-0x2000)<=8 && abs(py-0x1000)<=8 && abs(pz-0x0800)<=8) ? "OK (~entrada)" : "<-- DIVERGE");
     }
 
-    // ========== Gate do sinal Target-Y do hardware para Pilotwings ==========
-    // O caminho padrao precisa permanecer bit-a-bit igual para Mario Kart e
-    // todos os outros jogos DSP-1. Somente a instancia explicitamente marcada
-    // usa a convencao de sinal do Aurora no termo horizontal do eixo Y.
+    // ========== Target-Y: keep Aurora's hardware sign globally ==========
+    // The Revive safety gate is deliberately NOT imported: Aurora already
+    // follows the documented DSP-1 Target equation for every DSP-1 title.
     {
-        SNDSP1 gated;
+        SNDSP1 target;
+        sendByte(target, 0x02);
+        sendWord(target, 0x0000); sendWord(target, 0x0000); sendWord(target, 0x0000);
+        sendWord(target, 0x0600); sendWord(target, 0x0200);
+        sendWord(target, 0x2000); sendWord(target, 0x1000);
+        (void)readWord(target); (void)readWord(target);
+        (void)readWord(target); (void)readWord(target);
 
-        sendByte(gated, 0x02);  // Parameter
-        sendWord(gated, 0x0000); // Fx
-        sendWord(gated, 0x0000); // Fy
-        sendWord(gated, 0x0000); // Fz
-        sendWord(gated, 0x0600); // Lfe
-        sendWord(gated, 0x0200); // Les
-        sendWord(gated, 0x2000); // Aas = 45 graus
-        sendWord(gated, 0x1000); // Azs
-        (void)readWord(gated); (void)readWord(gated);
-        (void)readWord(gated); (void)readWord(gated);
-
-        // Default: calculo historico do Revive (usado por Mario Kart).
-        sendByte(gated, 0x0E);
-        sendWord(gated, 32); sendWord(gated, 48);
-        int16_t defaultX = readWord(gated);
-        int16_t defaultY = readWord(gated);
-
-        // Gate ligado: convencao de sinal confirmada pelo microcodigo.
-        gated.SetTargetYSubtract(TRUE);
-        sendByte(gated, 0x0E);
-        sendWord(gated, 32); sendWord(gated, 48);
-        int16_t pilotX = readWord(gated);
-        int16_t pilotY = readWord(gated);
-
-        // Desligar deve restaurar exatamente o resultado anterior.
-        gated.SetTargetYSubtract(FALSE);
-        sendByte(gated, 0x0E);
-        sendWord(gated, 32); sendWord(gated, 48);
-        int16_t restoredX = readWord(gated);
-        int16_t restoredY = readWord(gated);
-
-        bool ok = !gated.GetTargetYSubtract() &&
-                  defaultX == -43 && defaultY == 171 &&
-                  pilotX == -43 && pilotY == 41 &&
-                  restoredX == defaultX && restoredY == defaultY;
-
-        printf("\n[Pilotwings gate] default=(%d,%d) experimental=(%d,%d) "
-               "restored=(%d,%d)  %s\n",
-               defaultX, defaultY, pilotX, pilotY, restoredX, restoredY,
-               ok ? "OK" : "FALHOU");
+        sendByte(target, 0x0E);
+        sendWord(target, 32); sendWord(target, 48);
+        const int16_t x = readWord(target);
+        const int16_t y = readWord(target);
+        const bool ok = (x == -43 && y == 41);
+        printf("\n[Target-Y hardware sign] (%d,%d)  %s\n",
+               x, y, ok ? "OK" : "FALHOU");
         if (!ok) failures++;
     }
 
-    // ========== Revisao DSP-1 original x DSP-1B (op28) ==========
-    // O DSP-1/1A antigo usa C<<6 como fracao *signed* na interpolacao.
-    // O DSP-1B mascara esse bit e corrige o comprimento do vetor. O dump
-    // USA/Japan de Pilotwings precisa do resultado antigo; Mario Kart e os
-    // demais jogos continuam no comportamento DSP-1B por padrao.
+    // ========== DSP-1/1A original x DSP-1B op28 ==========
+    // Known differential vector from the original-vs-1B microcode behavior.
     {
         SNDSP1 revision;
         const int16_t x = 29127, y = 18313, z = -24113;
@@ -292,7 +261,7 @@ int main() {
         revision.SetOriginalDistanceBug(TRUE);
         const int16_t dsp1 = runDistance(revision, x, y, z);
 
-        // Reset do chip nao pode apagar a revisao escolhida pelo cartucho.
+        // A console reset must preserve the revision selected by the cart.
         revision.Reset();
         const int16_t dsp1AfterReset = runDistance(revision, x, y, z);
 
@@ -300,7 +269,8 @@ int main() {
         const int16_t restored = runDistance(revision, x, y, z);
 
         const bool ok = dsp1b == 19310 && dsp1 == 19399 &&
-                        dsp1AfterReset == dsp1 && restored == dsp1b;
+                        dsp1AfterReset == dsp1 && restored == dsp1b &&
+                        !revision.GetOriginalDistanceBug();
         printf("\n[DSP revision op28] DSP1B=%d DSP1=%d after-reset=%d "
                "restored=%d  %s\n",
                dsp1b, dsp1, dsp1AfterReset, restored,

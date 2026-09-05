@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <errno.h>
@@ -16,24 +17,19 @@
 #include "mainloop_iop.h"
 
 extern "C" {
-int MCSave_Write(char *pPath, char *pData, int nBytes);
-int MCSave_WriteSync(int block, int *pResult);
 #include "netplay_ee.h"
 }
 
 #include "mainloop_shared.h"
 #include "mainloop_state.h"
+#include "nes/quicknes/quicknes_bridge.h" /* AURORA_QN_TURBOFILE_SAVE_V2_20260828 */
 
-/* The iaddis-era custom MCSAVE.IRX async memory-card writer has been
-   retired -- see embedded_irx.cpp.  mainloop_iop.cpp no longer
-   attempts to IOPLoadModule("MCSAVE.IRX") and never calls
-   MCSave_Init(), so _MainLoop_bMCSaveReady always stays FALSE and
-   the synchronous newlib-stdio-via-iomanX path below is always
-   taken.  The flag itself is kept as a vestigial extern so the
-   build doesn't have to touch every call site that still tests it;
-   it is effectively dead code that branch predictors will fold out.
-   Defined in mainloop_iop.cpp. */
-extern Bool _MainLoop_bMCSaveReady;
+/* AURORA_PCE_EXPERIMENTAL_V1 */
+
+/* AURORA_RUNTIME_LEAN_V1_MCSAVE_20260824
+ * The old MCSAVE.IRX path is unreachable in Aurora: it is never loaded or
+ * initialized. mainloop_state therefore contains only the supported
+ * synchronous newlib/iomanX storage path. */
 
 #if MAINLOOP_HISTORY
 extern Uint32 _nHistory;
@@ -57,6 +53,16 @@ static Uint32 _PathCalcHash(const char *pStr)
 void PathTruncFileName(Char *pOut, Char *pStr, Int32 nMaxChars)
 {
     Uint32 hash;
+    Int32 nOriginalMax = nMaxChars;
+
+    /* AURORA_RUNTIME_SAFE_PATH_TRUNC_V1_4_2 */
+    if (!pOut)
+        return;
+    if (!pStr || nMaxChars <= 0)
+    {
+        *pOut = '\0';
+        return;
+    }
 
     hash = _PathCalcHash(pStr);
 
@@ -70,10 +76,10 @@ void PathTruncFileName(Char *pOut, Char *pStr, Int32 nMaxChars)
     // terminate
     *pOut = 0;
 
-    if (nMaxChars <= 0)
+    /* pOut-3 is valid only after at least three characters were copied. */
+    if (nMaxChars <= 0 && nOriginalMax >= 3)
     {
-        // mangle end of name
-        sprintf(pOut - 3, "%03d", hash % 1000);
+        sprintf(pOut - 3, "%03u", (unsigned int)(hash % 1000));
     }
 }
 
@@ -89,73 +95,972 @@ int PathGetMaxFileNameLength(const char *pPath)
     return 256;
 }
 
+/* AURORA_FINAL_V1_7_D88_DUAL_SRAM_PERSIST_20260901 */
+/* AURORA_SRAM_STORAGE_V1
+ * _SramPath stays the settings/legacy root. SRAM data has its own policy. */
+static MainLoopSramDeviceE _MainLoop_SramDevice = MAINLOOP_SRAMDEVICE_AUTO;
+
 static const Char *_MainLoopSramGetSystemDirectoryName()
 {
-    return _pSystem == _pNes ? "NES" : "SNES";
+    if (_pSystem == _pNes)  return "NES";
+    if (_pSystem == _pSega) return "SEGA";
+    if (_pSystem == _pPce)  return "PCE";
+    return "SNES";
+}
+
+static const Char *_MainLoopSramRoot(MainLoopSramDeviceE eDevice)
+{
+    return eDevice == MAINLOOP_SRAMDEVICE_USB ? "mass0:/SNESticle" : _SramPath;
+}
+
+static Bool _MainLoopSramUsbReady()
+{
+    struct stat Status;
+    if (!MassStorageIsEnabled())
+        return FALSE;
+    return stat("mass0:/", &Status) == 0 ? TRUE : FALSE;
+}
+
+void MainLoopSramSetDevice(MainLoopSramDeviceE eDevice)
+{
+    if (eDevice < MAINLOOP_SRAMDEVICE_AUTO || eDevice >= MAINLOOP_SRAMDEVICE_NUM)
+        eDevice = MAINLOOP_SRAMDEVICE_AUTO;
+    _MainLoop_SramDevice = eDevice;
+}
+
+void MainLoopSramCycleDevice()
+{
+    _MainLoop_SramDevice = (MainLoopSramDeviceE)(_MainLoop_SramDevice + 1);
+    if (_MainLoop_SramDevice >= MAINLOOP_SRAMDEVICE_NUM)
+        _MainLoop_SramDevice = MAINLOOP_SRAMDEVICE_AUTO;
+}
+
+MainLoopSramDeviceE MainLoopSramGetDevice()
+{
+    return _MainLoop_SramDevice;
+}
+
+const Char *MainLoopSramGetDeviceName()
+{
+    switch (_MainLoop_SramDevice)
+    {
+        case MAINLOOP_SRAMDEVICE_USB:     return "仅USB";
+        case MAINLOOP_SRAMDEVICE_MEMCARD: return "记忆卡";
+        default:                          return "USB优先，回退记忆卡";
+    }
+}
+
+const Char *MainLoopSramGetBrowseRoot()
+{
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+        return _MainLoopSramRoot(MAINLOOP_SRAMDEVICE_USB);
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
+        return _MainLoopSramRoot(MAINLOOP_SRAMDEVICE_MEMCARD);
+    return _MainLoopSramUsbReady()
+        ? _MainLoopSramRoot(MAINLOOP_SRAMDEVICE_USB)
+        : _MainLoopSramRoot(MAINLOOP_SRAMDEVICE_MEMCARD);
+}
+
+Bool MainLoopSramNeedsMemoryCardPreflight()
+{
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+        return FALSE;
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
+        return TRUE;
+    return _MainLoopSramUsbReady() ? FALSE : TRUE;
 }
 
 static Bool _MainLoopSramEnsureOneDir(const Char *pPath)
 {
     struct stat Status;
 
-    if (mkdir(pPath, 0777) == 0 || errno == EEXIST)
+    /* AURORA_RUNTIME_SAFE_SRAM_DIR_V1_4_1
+     * EEXIST alone is insufficient: the path could be a regular file. */
+    if (mkdir(pPath, 0777) == 0)
+        return TRUE;
+    return stat(pPath, &Status) == 0 && S_ISDIR(Status.st_mode)
+        ? TRUE : FALSE;
+}
+
+/* AURORA_SYSTEM_BIOS_PATH_FIX_V1_20260826
+ * SYSTEM stores user-supplied firmware, not SRAM. Do not let the SRAM target
+ * decide where BIOS files live.
+ *
+ * Prefer writable mass roots independently of the SRAM setting. This also
+ * covers a normal USB device exposed as mass0: and alternative mass aliases.
+ * If no mass root is writable, preserve the previous SRAM-root behaviour as
+ * a compatibility fallback (including the memory-card save-directory helper).
+ */
+static Bool _MainLoopSystemCopyDirectory(Char *pOut, Int32 nOutBytes,
+                                         const Char *pDirectory)
+{
+    int nChars;
+
+    if (!pOut || nOutBytes <= 0 || !pDirectory || !*pDirectory)
+        return FALSE;
+
+    nChars = snprintf(pOut, (size_t)nOutBytes, "%s", pDirectory);
+    if (nChars < 0 || nChars >= nOutBytes)
     {
+        pOut[0] = '\0';
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static Bool _MainLoopSystemTryWritableRoot(Char *pOut, Int32 nOutBytes,
+                                           const Char *pRoot)
+{
+    Char Directory[512];
+    int nChars;
+
+    if (!pRoot || !*pRoot)
+        return FALSE;
+
+    if (!_MainLoopSramEnsureOneDir(pRoot))
+        return FALSE;
+
+    nChars = snprintf(Directory, sizeof(Directory), "%s/SYSTEM", pRoot);
+    if (nChars < 0 || nChars >= (int)sizeof(Directory))
+        return FALSE;
+
+    if (!_MainLoopSramEnsureOneDir(Directory))
+        return FALSE;
+
+    return _MainLoopSystemCopyDirectory(
+        pOut, nOutBytes, Directory);
+}
+
+static Bool _MainLoopSystemFileAtRoot(Char *pOut, Int32 nOutBytes,
+                                      const Char *pRoot,
+                                      const Char *pFileName)
+{
+    struct stat Status;
+    Char Directory[512];
+    Char FilePath[1024];
+    int nChars;
+
+    if (!pOut || nOutBytes <= 0 ||
+        !pRoot || !*pRoot || !pFileName || !*pFileName)
+        return FALSE;
+
+    nChars = snprintf(Directory, sizeof(Directory), "%s/SYSTEM", pRoot);
+    if (nChars < 0 || nChars >= (int)sizeof(Directory))
+        return FALSE;
+
+    nChars = snprintf(FilePath, sizeof(FilePath),
+                      "%s/%s", Directory, pFileName);
+    if (nChars < 0 || nChars >= (int)sizeof(FilePath))
+        return FALSE;
+
+    if (stat(FilePath, &Status) != 0 || S_ISDIR(Status.st_mode))
+        return FALSE;
+
+    return _MainLoopSystemCopyDirectory(
+        pOut, nOutBytes, Directory);
+}
+
+Bool MainLoopFindSystemFileDirectory(Char *pOut, Int32 nOutBytes,
+                                     const Char *pFileName)
+{
+    static const Char *pPreferredRoots[] =
+    {
+        "mass0:/SNESticle",
+        "mass1:/SNESticle",
+        "mass:/SNESticle",
+        NULL
+    };
+    static const Char *pFallbackRoots[] =
+    {
+        "mc0:/SNESticle",
+        "mc1:/SNESticle",
+        "mmce0:/SNESticle",
+        "mmce1:/SNESticle",
+        NULL
+    };
+    const Char *pActiveRoot;
+    Int32 i;
+
+    if (!pOut || nOutBytes <= 0 || !pFileName || !*pFileName)
+        return FALSE;
+    pOut[0] = '\0';
+
+    /* Canonical USB firmware tree wins first. */
+    for (i = 0; pPreferredRoots[i]; ++i)
+    {
+        if (_MainLoopSystemFileAtRoot(
+                pOut, nOutBytes, pPreferredRoots[i], pFileName))
+        {
+            printf("[SYSTEM] found %s in %s\n", pFileName, pOut);
+            return TRUE;
+        }
+    }
+
+    /* Preserve any configured/legacy root as a secondary lookup. */
+    pActiveRoot = MainLoopSramGetBrowseRoot();
+    if (pActiveRoot && *pActiveRoot &&
+        _MainLoopSystemFileAtRoot(
+            pOut, nOutBytes, pActiveRoot, pFileName))
+    {
+        printf("[SYSTEM] found %s in %s\n", pFileName, pOut);
         return TRUE;
     }
-    return stat(pPath, &Status) == 0 && S_ISDIR(Status.st_mode);
+
+    for (i = 0; pFallbackRoots[i]; ++i)
+    {
+        if (_MainLoopSystemFileAtRoot(
+                pOut, nOutBytes, pFallbackRoots[i], pFileName))
+        {
+            printf("[SYSTEM] found %s in %s\n", pFileName, pOut);
+            return TRUE;
+        }
+    }
+
+    pOut[0] = '\0';
+    return FALSE;
+}
+
+Bool MainLoopEnsureSystemDirectory(Char *pOut, Int32 nOutBytes)
+{
+    static const Char *pPreferredRoots[] =
+    {
+        "mass0:/SNESticle",
+        "mass1:/SNESticle",
+        "mass:/SNESticle",
+        NULL
+    };
+    const Char *pRoot;
+    Bool bMemCard;
+    Char Directory[512];
+    int nChars;
+    Int32 i;
+
+    if (!pOut || nOutBytes <= 0)
+        return FALSE;
+    pOut[0] = '\0';
+
+    /* Firmware storage is independent of the SRAM destination. */
+    for (i = 0; pPreferredRoots[i]; ++i)
+    {
+        if (_MainLoopSystemTryWritableRoot(
+                pOut, nOutBytes, pPreferredRoots[i]))
+        {
+            printf("[SYSTEM] directory: %s\n", pOut);
+            return TRUE;
+        }
+    }
+
+    /* Compatibility fallback: retain the old selected SRAM root behaviour. */
+    pRoot = MainLoopSramGetBrowseRoot();
+    bMemCard = MainLoopSramNeedsMemoryCardPreflight();
+    if (!pRoot || !*pRoot)
+        return FALSE;
+
+    if (!bMemCard && !_MainLoopSramEnsureOneDir(pRoot))
+        return FALSE;
+
+    nChars = snprintf(Directory, sizeof(Directory), "%s/SYSTEM", pRoot);
+    if (nChars < 0 || nChars >= (int)sizeof(Directory))
+        return FALSE;
+
+    if (!_MainLoopSramEnsureOneDir(Directory))
+    {
+        if (!bMemCard)
+            return FALSE;
+
+        {
+            int Result = MemCardCreateSave(
+                (char *)pRoot, _MainLoop_SaveTitle, TRUE);
+            if (Result < 0)
+            {
+                printf("[SYSTEM] MemCardCreateSave('%s') failed: %d\n",
+                       pRoot, Result);
+                return FALSE;
+            }
+        }
+
+        if (!_MainLoopSramEnsureOneDir(Directory))
+            return FALSE;
+    }
+
+    if (!_MainLoopSystemCopyDirectory(
+            pOut, nOutBytes, Directory))
+        return FALSE;
+
+    printf("[SYSTEM] fallback directory: %s\n", pOut);
+    return TRUE;
+}
+
+/* AURORA_V5_COPIER_LOADER_MEDIA_FLOW_20260831
+ * Keep copier media out of ROM directories and out of SYSTEM firmware.
+ * DSK is copier-neutral so other hardware loaders can share the same media
+ * root later without pretending their disks belong to the SWC.
+ */
+Bool MainLoopEnsureSwcDirectory(Char *pOut, Int32 nOutBytes)
+{
+    Char SystemDirectory[512];
+    Char Root[512];
+    size_t n;
+    int nChars;
+
+    if (!pOut || nOutBytes <= 0)
+        return FALSE;
+    pOut[0] = 0;
+
+    if (!MainLoopEnsureSystemDirectory(
+            SystemDirectory, (Int32)sizeof(SystemDirectory)))
+        return FALSE;
+
+    n = strlen(SystemDirectory);
+    if (n < 7 || strcmp(SystemDirectory + n - 7, "/SYSTEM") != 0 ||
+        n - 7 >= sizeof(Root))
+        return FALSE;
+
+    memcpy(Root, SystemDirectory, n - 7);
+    Root[n - 7] = 0;
+
+    nChars = snprintf(pOut, (size_t)nOutBytes, "%s/DSK", Root);
+    if (nChars < 0 || nChars >= nOutBytes)
+    {
+        pOut[0] = 0;
+        return FALSE;
+    }
+
+    if (!_MainLoopSramEnsureOneDir(pOut))
+    {
+        pOut[0] = 0;
+        return FALSE;
+    }
+
+    printf("[DSK] directory: %s\n", pOut);
+    return TRUE;
 }
 
 static void _MainLoopSramBuildPath(Char *pPath, Int32 nPathBytes,
-                                   Bool bLegacyRoot)
+                                   const Char *pRoot, Bool bLegacyRoot)
 {
     Char Directory[512];
     Char SaveName[256];
     const Char *pExtension =
         _pSystem->GetString(Emu::System::StringE::STRING_SRAMEXT);
-    Int32 nSuffixBytes = (Int32)strlen(pExtension) + 1; /* dot + ext */
+    Int32 nSuffixBytes = (Int32)strlen(pExtension) + 1;
 
     if (bLegacyRoot)
-    {
-        snprintf(Directory, sizeof(Directory), "%s", _SramPath);
-    }
+        snprintf(Directory, sizeof(Directory), "%s", pRoot);
     else
-    {
-        snprintf(Directory, sizeof(Directory), "%s/%s", _SramPath,
+        snprintf(Directory, sizeof(Directory), "%s/%s", pRoot,
                  _MainLoopSramGetSystemDirectoryName());
-    }
 
-    PathTruncFileName(
-        SaveName,
-        _RomName,
-        PathGetMaxFileNameLength(Directory) - nSuffixBytes
-    );
+    PathTruncFileName(SaveName, _RomName,
+        PathGetMaxFileNameLength(Directory) - nSuffixBytes);
     snprintf(pPath, nPathBytes, "%s/%s.%s", Directory, SaveName, pExtension);
 }
 
-static Bool _MainLoopSramEnsureSystemDirectory()
+/* AURORA_SRAM_MC_COPY_ALIAS_V1
+ * A .srm created on a PS2 Memory Card has a filename ceiling of 32 chars.
+ * PathTruncFileName therefore shortens long ROM names and replaces the last
+ * three base-name chars with its stable decimal hash. A normal file copy to
+ * USB preserves that short filename, while the canonical USB path uses the
+ * full long filename. Build the exact MC spelling so copied saves remain
+ * discoverable without relying on MC attributes or timestamps. */
+static void _MainLoopSramBuildCopiedMcPath(Char *pPath, Int32 nPathBytes,
+                                           const Char *pRoot,
+                                           Bool bLegacyRoot)
+{
+    Char Directory[512];
+    Char SaveName[256];
+    const Char *pExtension =
+        _pSystem->GetString(Emu::System::StringE::STRING_SRAMEXT);
+    const Int32 nMcMaxFileName = 32;
+    Int32 nSuffixBytes = (Int32)strlen(pExtension) + 1;
+    Int32 nBaseMax = nMcMaxFileName - nSuffixBytes;
+
+    if (bLegacyRoot)
+        snprintf(Directory, sizeof(Directory), "%s", pRoot);
+    else
+        snprintf(Directory, sizeof(Directory), "%s/%s", pRoot,
+                 _MainLoopSramGetSystemDirectoryName());
+
+    PathTruncFileName(SaveName, _RomName, nBaseMax);
+    snprintf(pPath, nPathBytes, "%s/%s.%s",
+             Directory, SaveName, pExtension);
+}
+
+static Bool _MainLoopSramEnsureSystemDirectory(const Char *pRoot, Bool bMemCard)
 {
     Char Directory[512];
 
-    snprintf(Directory, sizeof(Directory), "%s/%s", _SramPath,
+    if (!bMemCard && !_MainLoopSramEnsureOneDir(pRoot))
+        return FALSE;
+
+    snprintf(Directory, sizeof(Directory), "%s/%s", pRoot,
              _MainLoopSramGetSystemDirectoryName());
     if (_MainLoopSramEnsureOneDir(Directory))
+        return TRUE;
+
+    if (bMemCard)
     {
+        int Result = MemCardCreateSave((char *)pRoot, _MainLoop_SaveTitle, TRUE);
+        if (Result < 0)
+        {
+            printf("[SRAM] MemCardCreateSave('%s') failed: %d\n", pRoot, Result);
+            return FALSE;
+        }
+    }
+    return _MainLoopSramEnsureOneDir(Directory);
+}
+
+/* Transactional read: a short/corrupt USB file cannot partially overwrite
+ * live SRAM before AUTO falls back to MC. */
+static Bool _MainLoopSramReadFile(const Char *pPath, Uint8 *pData, Uint32 nBytes)
+{
+    FILE *pFile;
+    Uint8 *pTemp;
+    size_t nRead;
+    struct stat Status;
+
+    if (stat(pPath, &Status) != 0 || (Uint32)Status.st_size != nBytes)
+        return FALSE;
+
+    pTemp = (Uint8 *)malloc(nBytes);
+    if (!pTemp)
+        return FALSE;
+
+    pFile = fopen(pPath, "rb");
+    if (!pFile)
+    {
+        free(pTemp);
+        return FALSE;
+    }
+    nRead = fread(pTemp, 1, nBytes, pFile);
+    fclose(pFile);
+    if (nRead == nBytes)
+        memcpy(pData, pTemp, nBytes);
+    free(pTemp);
+    return nRead == nBytes ? TRUE : FALSE;
+}
+
+static Bool _MainLoopSramWriteFile(const Char *pPath, Uint8 *pData, Uint32 nBytes)
+{
+    FILE *pFile = fopen(pPath, "wb");
+    size_t nWritten;
+    Bool bOK;
+    if (!pFile)
+        return FALSE;
+    nWritten = fwrite(pData, 1, nBytes, pFile);
+    bOK = fflush(pFile) == 0 ? TRUE : FALSE;
+    if (fclose(pFile) != 0)
+        bOK = FALSE;
+    return nWritten == nBytes && bOK ? TRUE : FALSE;
+}
+
+
+
+/* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901
+ *
+ * Physical cartridge SRAM persistence is intentionally separate from the
+ * classic copier's own 32 KiB battery B-RAM. The filename is derived from
+ * the inserted cartridge exactly like an ordinary SNES .srm.
+ */
+static Char s_SwcCartSRAMName[512] = {0};
+static Bool s_SwcCartSRAMMigrationPending = FALSE;
+
+static Bool _MainLoopSwcCartSramBuildPath(
+    Char *pPath, Int32 nPathBytes,
+    const Char *pRoot, Bool bLegacyRoot,
+    Bool bCopiedMcName)
+{
+    Char Directory[512];
+    Char SaveName[512];
+    const Char *pExtension;
+    Int32 nSuffixBytes;
+    Int32 nBaseMax;
+    int n;
+
+    if (!pPath || nPathBytes <= 0 || !pRoot ||
+        !s_SwcCartSRAMName[0] || !_pSnes)
+        return FALSE;
+
+    pExtension =
+        _pSnes->GetString(Emu::System::StringE::STRING_SRAMEXT);
+    if (!pExtension || !*pExtension)
+        return FALSE;
+
+    if (bLegacyRoot)
+        snprintf(Directory, sizeof(Directory), "%s", pRoot);
+    else
+        snprintf(Directory, sizeof(Directory), "%s/%s", pRoot,
+                 _MainLoopSramGetSystemDirectoryName());
+
+    nSuffixBytes = (Int32)strlen(pExtension) + 1;
+    nBaseMax = bCopiedMcName
+        ? (32 - nSuffixBytes)
+        : (PathGetMaxFileNameLength(Directory) - nSuffixBytes);
+
+    if (nBaseMax <= 0)
+        return FALSE;
+
+    PathTruncFileName(SaveName, s_SwcCartSRAMName, nBaseMax);
+    n = snprintf(
+        pPath, (size_t)nPathBytes,
+        "%s/%s.%s", Directory, SaveName, pExtension);
+    return n >= 0 && n < nPathBytes ? TRUE : FALSE;
+}
+
+static Bool _MainLoopLoadSwcCartSRAMFrom(
+    MainLoopSramDeviceE eDevice, Bool *pbLegacy)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    Uint8 *pData;
+    Int32 nBytes;
+    Char Path[1024];
+    Char Alias[1024];
+
+    Path[0] = 0;
+    Alias[0] = 0;
+    if (pbLegacy)
+        *pbLegacy = FALSE;
+
+    if (!_pSnes || _pSystem != _pSnes ||
+        !_pSnes->IsSuperWildCard() ||
+        !_pSnes->HasSuperWildCardCartridgeBatterySRAM())
+        return FALSE;
+
+    nBytes = _pSnes->GetSuperWildCardCartridgeSRAMBytes();
+    pData = _pSnes->GetSuperWildCardCartridgeSRAMData();
+    if (!pData || nBytes <= 0)
+        return FALSE;
+
+    if (_MainLoopSwcCartSramBuildPath(
+            Path, sizeof(Path), pRoot, FALSE, FALSE) &&
+        _MainLoopSramReadFile(Path, pData, (Uint32)nBytes))
+    {
+        ConPrint("SWC cartridge SRAM loaded: %s\n", Path);
         return TRUE;
     }
 
-    /* The application save may not exist yet on a new/replaced card. Create
-       its icon-bearing root first, then retry the normal nested directory. */
-    int nCreateResult = MemCardCreateSave(
-        _SramPath,
-        _MainLoop_SaveTitle,
-        TRUE
-    );
-    if (nCreateResult < 0)
+    if (eDevice == MAINLOOP_SRAMDEVICE_USB &&
+        _MainLoopSwcCartSramBuildPath(
+            Alias, sizeof(Alias), pRoot, FALSE, TRUE) &&
+        (!Path[0] || strcmp(Alias, Path) != 0) &&
+        _MainLoopSramReadFile(Alias, pData, (Uint32)nBytes))
     {
-        printf("[SRAM] MemCardCreateSave('%s') failed: %d\n",
-               _SramPath, nCreateResult);
+        if (pbLegacy) *pbLegacy = TRUE;
+        ConPrint("SWC cartridge SRAM loaded (MC-copy alias): %s\n", Alias);
+        return TRUE;
     }
-    return _MainLoopSramEnsureOneDir(Directory);
+
+    Path[0] = 0;
+    if (_MainLoopSwcCartSramBuildPath(
+            Path, sizeof(Path), pRoot, TRUE, FALSE) &&
+        _MainLoopSramReadFile(Path, pData, (Uint32)nBytes))
+    {
+        if (pbLegacy) *pbLegacy = TRUE;
+        ConPrint("SWC cartridge SRAM loaded (legacy): %s\n", Path);
+        return TRUE;
+    }
+
+    Alias[0] = 0;
+    if (eDevice == MAINLOOP_SRAMDEVICE_USB &&
+        _MainLoopSwcCartSramBuildPath(
+            Alias, sizeof(Alias), pRoot, TRUE, TRUE) &&
+        (!Path[0] || strcmp(Alias, Path) != 0) &&
+        _MainLoopSramReadFile(Alias, pData, (Uint32)nBytes))
+    {
+        if (pbLegacy) *pbLegacy = TRUE;
+        ConPrint(
+            "SWC cartridge SRAM loaded (legacy MC-copy alias): %s\n",
+            Alias);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+void _MainLoopSwcCartSRAMAttach(const Char *pCartPath)
+{
+    const Char *pName;
+    Bool bLoaded = FALSE;
+    Bool bLegacy = FALSE;
+    Bool bMcFallback = FALSE;
+    int n;
+
+    s_SwcCartSRAMName[0] = 0;
+    s_SwcCartSRAMMigrationPending = FALSE;
+
+    if (!pCartPath || !*pCartPath || !_pSnes ||
+        _pSystem != _pSnes || !_pSnes->IsSuperWildCard() ||
+        !_pSnes->HasSuperWildCardCartridge())
+        return;
+
+    pName = pCartPath;
+    for (const Char *p = pCartPath; *p; ++p)
+        if (*p == '/' || *p == '\\')
+            pName = p + 1;
+
+    if (!*pName)
+        return;
+
+    n = snprintf(
+        s_SwcCartSRAMName, sizeof(s_SwcCartSRAMName), "%s", pName);
+    if (n < 0 || n >= (int)sizeof(s_SwcCartSRAMName))
+    {
+        s_SwcCartSRAMName[0] = 0;
+        return;
+    }
+
+    /* AURORA_FINAL_V1_7_D88_DUAL_SRAM_PERSIST_20260901
+     * Ordinary Aurora saves use the ROM stem. Keep the physical cart SRAM
+     * namespace identical: "Game.sfc" -> "Game.srm". */
+    {
+        Char *pExt = strrchr(s_SwcCartSRAMName, '.');
+        if (pExt && pExt != s_SwcCartSRAMName)
+            *pExt = 0;
+    }
+
+    /* Volatile cartridge RAM is emulated by the core but never persisted. */
+    if (!_pSnes->HasSuperWildCardCartridgeBatterySRAM())
+        return;
+
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+    {
+        if (_MainLoopSramUsbReady())
+            bLoaded = _MainLoopLoadSwcCartSRAMFrom(
+                MAINLOOP_SRAMDEVICE_USB, &bLegacy);
+    }
+    else if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
+    {
+        bLoaded = _MainLoopLoadSwcCartSRAMFrom(
+            MAINLOOP_SRAMDEVICE_MEMCARD, &bLegacy);
+    }
+    else
+    {
+        if (_MainLoopSramUsbReady())
+            bLoaded = _MainLoopLoadSwcCartSRAMFrom(
+                MAINLOOP_SRAMDEVICE_USB, &bLegacy);
+
+        if (!bLoaded)
+        {
+            Bool bMcLegacy = FALSE;
+            bLoaded = _MainLoopLoadSwcCartSRAMFrom(
+                MAINLOOP_SRAMDEVICE_MEMCARD, &bMcLegacy);
+            if (bLoaded)
+            {
+                bLegacy = bMcLegacy;
+                bMcFallback = TRUE;
+            }
+        }
+    }
+
+    _pSnes->ClearSuperWildCardCartridgeSRAMDirty();
+
+    /* Same copy/migration policy as ordinary Aurora SRAM: never delete source. */
+    s_SwcCartSRAMMigrationPending =
+        bLoaded &&
+        (bLegacy || (bMcFallback && _MainLoopSramUsbReady()));
+
+    if (s_SwcCartSRAMMigrationPending)
+        _MainLoop_SRAMUpdated = TRUE;
+}
+
+void _MainLoopSwcCartSRAMDetach()
+{
+    s_SwcCartSRAMName[0] = 0;
+    s_SwcCartSRAMMigrationPending = FALSE;
+}
+
+static Bool _MainLoopSaveSwcCartSRAMTo(
+    MainLoopSramDeviceE eDevice)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    Bool bMemCard =
+        eDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? TRUE : FALSE;
+    Uint8 *pData;
+    Int32 nBytes;
+    Char Path[1024];
+
+    if (!_pSnes || _pSystem != _pSnes ||
+        !_pSnes->IsSuperWildCard() ||
+        !_pSnes->HasSuperWildCardCartridgeBatterySRAM())
+        return TRUE;
+
+    /* AURORA_FINAL_V1_7_D88_DUAL_SRAM_PERSIST_20260901
+     * Menu/unload are explicit persistence boundaries. Do not use the dirty
+     * bit to skip a battery-cart write once the boundary has been entered. */
+    nBytes = _pSnes->GetSuperWildCardCartridgeSRAMBytes();
+    pData = _pSnes->GetSuperWildCardCartridgeSRAMData();
+
+    if (!pData || nBytes <= 0 || !s_SwcCartSRAMName[0] ||
+        !_MainLoopSramEnsureSystemDirectory(pRoot, bMemCard) ||
+        !_MainLoopSwcCartSramBuildPath(
+            Path, sizeof(Path), pRoot, FALSE, FALSE))
+        return FALSE;
+
+    if (!_MainLoopSramWriteFile(Path, pData, (Uint32)nBytes))
+        return FALSE;
+
+    _pSnes->ClearSuperWildCardCartridgeSRAMDirty();
+    s_SwcCartSRAMMigrationPending = FALSE;
+    ConPrint("SWC cartridge SRAM saved: %s\n", Path);
+    return TRUE;
+}
+
+/* AURORA_QN_TURBOFILE_SAVE_V2_20260828
+ * The original ASCII Turbo File is one 8 KiB expansion-port memory unit,
+ * shared by compatible Famicom software. Keep one physical-style file in
+ * the NES save directory rather than pretending it is cartridge SRAM.
+ */
+static void _MainLoopTurboFileBuildPath(Char *pPath, Int32 nPathBytes,
+                                        const Char *pRoot)
+{
+    snprintf(pPath, nPathBytes, "%s/NES/TurboFile.sav", pRoot);
+}
+
+static Bool _MainLoopLoadTurboFileFrom(MainLoopSramDeviceE eDevice)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    Uint8 *pData = QuicknesBridge_GetTurboFileData();
+    const Int32 nBytes = QuicknesBridge_GetTurboFileBytes();
+    Char Path[1024];
+
+    if (!pData || nBytes != 0x2000)
+        return FALSE;
+
+    _MainLoopTurboFileBuildPath(Path, sizeof(Path), pRoot);
+    if (!_MainLoopSramReadFile(Path, pData, (Uint32)nBytes))
+        return FALSE;
+
+    QuicknesBridge_ClearTurboFileDirty();
+    ConPrint("Turbo File loaded: %s\n", Path);
+    return TRUE;
+}
+
+static void _MainLoopLoadTurboFile(void)
+{
+    /* AURORA_CD_AUDIO_STREAM_V3_NES_SAVE_GATE_20260829 */
+    if (_pSystem != _pNes ||
+        !QuicknesBridge_TurboFileEnabled() ||
+        QuicknesBridge_TurboFileDirty())
+        return;
+
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+    {
+        if (_MainLoopSramUsbReady())
+            (void)_MainLoopLoadTurboFileFrom(MAINLOOP_SRAMDEVICE_USB);
+        return;
+    }
+
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
+    {
+        (void)_MainLoopLoadTurboFileFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+        return;
+    }
+
+    if (_MainLoopSramUsbReady() &&
+        _MainLoopLoadTurboFileFrom(MAINLOOP_SRAMDEVICE_USB))
+        return;
+
+    (void)_MainLoopLoadTurboFileFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+}
+
+static Bool _MainLoopSaveTurboFileTo(MainLoopSramDeviceE eDevice)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    const Bool bMemCard =
+        eDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? TRUE : FALSE;
+    Uint8 *pData;
+    Int32 nBytes;
+    Char Path[1024];
+
+    if (_pSystem != _pNes ||
+        !QuicknesBridge_TurboFileEnabled() ||
+        !QuicknesBridge_TurboFileDirty())
+        return TRUE;
+
+    nBytes = QuicknesBridge_GetTurboFileBytes();
+    pData = QuicknesBridge_GetTurboFileData();
+    if (!pData || nBytes != 0x2000 ||
+        !_MainLoopSramEnsureSystemDirectory(pRoot, bMemCard))
+        return FALSE;
+
+    _MainLoopTurboFileBuildPath(Path, sizeof(Path), pRoot);
+    if (!_MainLoopSramWriteFile(Path, pData, (Uint32)nBytes))
+        return FALSE;
+
+    QuicknesBridge_ClearTurboFileDirty();
+    ConPrint("Turbo File saved: %s\n", Path);
+    return TRUE;
+}
+
+/* AURORA_SNES_TURBOFILE_V4_20260829
+ * One physical Twin image, separate from cartridge SRAM:
+ *   SNES/TurboFileTwin.sav = 160 KiB
+ * Layout matches the emulated hardware backing:
+ *   first 32 KiB = four TFII banks, next 128 KiB = STF.
+ */
+static void _MainLoopSnesTurboFileBuildPath(
+    Char *pPath, Int32 nPathBytes, const Char *pRoot)
+{
+    snprintf(pPath, nPathBytes, "%s/SNES/TurboFileTwin.sav", pRoot);
+}
+
+static Bool _MainLoopLoadSnesTurboFileFrom(MainLoopSramDeviceE eDevice)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    Uint8 *pData = SnesTurboFileGetData();
+    const Int32 nBytes = SnesTurboFileGetBytes();
+    Char Path[1024];
+
+    if (!pData || nBytes != 160 * 1024)
+        return FALSE;
+
+    _MainLoopSnesTurboFileBuildPath(Path, sizeof(Path), pRoot);
+    if (!_MainLoopSramReadFile(Path, pData, (Uint32)nBytes))
+        return FALSE;
+
+    SnesTurboFileClearDirty();
+    ConPrint("SNES Turbo File Twin loaded: %s\n", Path);
+    return TRUE;
+}
+
+static void _MainLoopLoadSnesTurboFile(void)
+{
+    if (_pSystem != _pSnes ||
+        !SnesTurboFileEnabled() ||
+        SnesTurboFileDirty())
+        return;
+
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+    {
+        if (_MainLoopSramUsbReady())
+            (void)_MainLoopLoadSnesTurboFileFrom(MAINLOOP_SRAMDEVICE_USB);
+        return;
+    }
+
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
+    {
+        (void)_MainLoopLoadSnesTurboFileFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+        return;
+    }
+
+    if (_MainLoopSramUsbReady() &&
+        _MainLoopLoadSnesTurboFileFrom(MAINLOOP_SRAMDEVICE_USB))
+        return;
+
+    (void)_MainLoopLoadSnesTurboFileFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+}
+
+static Bool _MainLoopSaveSnesTurboFileTo(MainLoopSramDeviceE eDevice)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    const Bool bMemCard =
+        eDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? TRUE : FALSE;
+    Uint8 *pData;
+    Int32 nBytes;
+    Char Path[1024];
+
+    if (_pSystem != _pSnes ||
+        !SnesTurboFileEnabled() ||
+        !SnesTurboFileDirty())
+        return TRUE;
+
+    nBytes = SnesTurboFileGetBytes();
+    pData = SnesTurboFileGetData();
+    if (!pData || nBytes != 160 * 1024 ||
+        !_MainLoopSramEnsureSystemDirectory(pRoot, bMemCard))
+        return FALSE;
+
+    _MainLoopSnesTurboFileBuildPath(Path, sizeof(Path), pRoot);
+    if (!_MainLoopSramWriteFile(Path, pData, (Uint32)nBytes))
+        return FALSE;
+
+    SnesTurboFileClearDirty();
+    ConPrint("SNES Turbo File Twin saved: %s\n", Path);
+    return TRUE;
+}
+
+/* AURORA_QN_BATTLEBOX_V5_20260829
+ * One physical 512-byte Battle Box shared by compatible Famicom games.
+ */
+static void _MainLoopBattleBoxBuildPath(
+    Char *pPath, Int32 nPathBytes, const Char *pRoot)
+{
+    snprintf(pPath, nPathBytes, "%s/NES/BattleBox.sav", pRoot);
+}
+
+static Bool _MainLoopLoadBattleBoxFrom(MainLoopSramDeviceE eDevice)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    Uint8 *pData = QuicknesBridge_GetBattleBoxData();
+    const Int32 nBytes = QuicknesBridge_GetBattleBoxBytes();
+    Char Path[1024];
+
+    if (!pData || nBytes != 0x0200)
+        return FALSE;
+
+    _MainLoopBattleBoxBuildPath(Path, sizeof(Path), pRoot);
+    if (!_MainLoopSramReadFile(Path, pData, (Uint32)nBytes))
+        return FALSE;
+
+    QuicknesBridge_ClearBattleBoxDirty();
+    ConPrint("Battle Box loaded: %s\n", Path);
+    return TRUE;
+}
+
+static void _MainLoopLoadBattleBox(void)
+{
+    if (_pSystem != _pNes ||
+        !QuicknesBridge_BattleBoxEnabled() ||
+        QuicknesBridge_BattleBoxDirty())
+        return;
+
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+    {
+        if (_MainLoopSramUsbReady())
+            (void)_MainLoopLoadBattleBoxFrom(MAINLOOP_SRAMDEVICE_USB);
+        return;
+    }
+
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
+    {
+        (void)_MainLoopLoadBattleBoxFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+        return;
+    }
+
+    if (_MainLoopSramUsbReady() &&
+        _MainLoopLoadBattleBoxFrom(MAINLOOP_SRAMDEVICE_USB))
+        return;
+
+    (void)_MainLoopLoadBattleBoxFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+}
+
+static Bool _MainLoopSaveBattleBoxTo(MainLoopSramDeviceE eDevice)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    const Bool bMemCard =
+        eDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? TRUE : FALSE;
+    Uint8 *pData;
+    Int32 nBytes;
+    Char Path[1024];
+
+    if (_pSystem != _pNes ||
+        !QuicknesBridge_BattleBoxEnabled() ||
+        !QuicknesBridge_BattleBoxDirty())
+        return TRUE;
+
+    nBytes = QuicknesBridge_GetBattleBoxBytes();
+    pData = QuicknesBridge_GetBattleBoxData();
+    if (!pData || nBytes != 0x0200 ||
+        !_MainLoopSramEnsureSystemDirectory(pRoot, bMemCard))
+        return FALSE;
+
+    _MainLoopBattleBoxBuildPath(Path, sizeof(Path), pRoot);
+    if (!_MainLoopSramWriteFile(Path, pData, (Uint32)nBytes))
+        return FALSE;
+
+    QuicknesBridge_ClearBattleBoxDirty();
+    ConPrint("Battle Box saved: %s\n", Path);
+    return TRUE;
 }
 
 static Uint32 _CalcChecksum(Uint32 *pData, Uint32 nWords)
@@ -174,154 +1079,259 @@ static Uint32 _CalcChecksum(Uint32 *pData, Uint32 nWords)
 
 Bool _MainLoopHasSRAM()
 {
-    return _pSystem ? (_pSystem->GetSRAMBytes() > 0) : FALSE;
+    if (!_pSystem)
+        return FALSE;
+    if (_pSystem->GetSRAMBytes() > 0)
+        return TRUE;
+    /* AURORA_QN_TURBOFILE_SAVE_V2_20260828: only advertise external
+     * persistence after the Turbo File has actually been written. */
+    if (_pSystem == _pNes &&
+        QuicknesBridge_TurboFileEnabled() &&
+        QuicknesBridge_TurboFileDirty())
+        return TRUE;
+    if (_pSystem == _pNes &&
+        QuicknesBridge_BattleBoxEnabled() &&
+        QuicknesBridge_BattleBoxDirty())
+        return TRUE;
+    if (_pSystem == _pSnes &&
+        SnesTurboFileEnabled() &&
+        SnesTurboFileDirty())
+        return TRUE;
+    return FALSE;
+}
+
+static Bool _MainLoopSaveSRAMTo(MainLoopSramDeviceE eDevice, Bool bSync)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    Bool bMemCard = eDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? TRUE : FALSE;
+    Int32 nSramBytes = _pSystem ? _pSystem->GetSRAMBytes() : 0;
+    Char Path[1024];
+    Uint8 *pSRAM = NULL;
+    Bool bAny = FALSE;
+    Bool bOK = TRUE;
+
+    /* AURORA_RUNTIME_LEAN_V1_MCSAVE_20260824: bSync only selected behavior in the retired async path. */
+    (void)bSync;
+
+    if (nSramBytes > 0)
+    {
+        bAny = TRUE;
+        pSRAM = _pSystem->GetSRAMData();
+        if (!pSRAM || !_MainLoopSramEnsureSystemDirectory(pRoot, bMemCard))
+            bOK = FALSE;
+        else
+        {
+            _MainLoopSramBuildPath(Path, sizeof(Path), pRoot, FALSE);
+
+            if (_pSystem == _pSnes && g_FakeSRAMSize &&
+                !_pSnes->IsSuperWildCard()) /* AURORA_SWC_FLOPPY_V1_20260831 */
+            {
+                struct stat Status;
+                if (stat(Path, &Status) == 0 &&
+                    (Uint32)Status.st_size != (Uint32)nSramBytes)
+                {
+                    printf("[SRAM] Force SRAM size mismatch: file=%ld expected=%d\n",
+                           (long)Status.st_size, (int)nSramBytes);
+                    memset(pSRAM, 0, nSramBytes);
+                }
+            }
+
+            ML_TRACE("SRAM save path: %s", Path);
+            if (!_MainLoopSramWriteFile(Path, pSRAM, (Uint32)nSramBytes))
+                bOK = FALSE;
+        }
+    }
+
+    /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901: save physical cartridge SRAM independently. */
+    if (_pSystem == _pSnes && _pSnes &&
+        _pSnes->IsSuperWildCard() &&
+        _pSnes->HasSuperWildCardCartridgeBatterySRAM())
+    {
+        bAny = TRUE;
+        if (!_MainLoopSaveSwcCartSRAMTo(eDevice))
+            bOK = FALSE;
+    }
+
+    /* AURORA_QN_TURBOFILE_SAVE_V2_20260828 */
+    if (_pSystem == _pNes &&
+        QuicknesBridge_TurboFileEnabled() &&
+        QuicknesBridge_TurboFileDirty())
+    {
+        bAny = TRUE;
+        if (!_MainLoopSaveTurboFileTo(eDevice))
+            bOK = FALSE;
+    }
+
+    if (_pSystem == _pNes &&
+        QuicknesBridge_BattleBoxEnabled() &&
+        QuicknesBridge_BattleBoxDirty())
+    {
+        bAny = TRUE;
+        if (!_MainLoopSaveBattleBoxTo(eDevice))
+            bOK = FALSE;
+    }
+
+    if (_pSystem == _pSnes &&
+        SnesTurboFileEnabled() &&
+        SnesTurboFileDirty())
+    {
+        bAny = TRUE;
+        if (!_MainLoopSaveSnesTurboFileTo(eDevice))
+            bOK = FALSE;
+    }
+
+    if (bAny && bOK)
+    {
+        _MainLoop_SRAMUpdated = FALSE;
+        return TRUE;
+    }
+    return FALSE;
 }
 
 Bool _MainLoopSaveSRAM(Bool bSync)
 {
-    Int32 nSramBytes = _pSystem ? _pSystem->GetSRAMBytes() : 0;
+    if (!_MainLoopHasSRAM())
+        return FALSE;
 
-    if (nSramBytes > 0)
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+        return _MainLoopSramUsbReady()
+            ? _MainLoopSaveSRAMTo(MAINLOOP_SRAMDEVICE_USB, bSync) : FALSE;
+
+    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
+        return _MainLoopSaveSRAMTo(MAINLOOP_SRAMDEVICE_MEMCARD, bSync);
+
+    if (_MainLoopSramUsbReady() &&
+        _MainLoopSaveSRAMTo(MAINLOOP_SRAMDEVICE_USB, bSync))
+        return TRUE;
+
+    return _MainLoopSaveSRAMTo(MAINLOOP_SRAMDEVICE_MEMCARD, bSync);
+}
+
+static Bool _MainLoopLoadSRAMFrom(MainLoopSramDeviceE eDevice,
+                                  Uint8 *pSRAM, Int32 nSramBytes,
+                                  Bool *pbLegacy)
+{
+    const Char *pRoot = _MainLoopSramRoot(eDevice);
+    Char Path[1024];
+    Char McCopyPath[1024];
+    *pbLegacy = FALSE;
+
+    _MainLoopSramBuildPath(Path, sizeof(Path), pRoot, FALSE);
+    if (_MainLoopSramReadFile(Path, pSRAM, (Uint32)nSramBytes))
     {
-        Char Path[1024];
-        Uint8 *pSRAM;
+        ConPrint("SRAM loaded: %s\n", Path);
+        return TRUE;
+    }
 
-        pSRAM = _pSystem->GetSRAMData();
-        if (!pSRAM || !_MainLoopSramEnsureSystemDirectory())
+    /* AURORA_SRAM_MC_COPY_ALIAS_V1
+     * A literal copy from mc0:/mc1: to USB preserves the Memory Card's
+     * shortened filename. Search that exact spelling as a USB alias. */
+    if (eDevice == MAINLOOP_SRAMDEVICE_USB)
+    {
+        _MainLoopSramBuildCopiedMcPath(
+            McCopyPath, sizeof(McCopyPath), pRoot, FALSE);
+
+        if (strcmp(McCopyPath, Path) != 0 &&
+            _MainLoopSramReadFile(
+                McCopyPath, pSRAM, (Uint32)nSramBytes))
         {
-            ML_TRACE("SRAM save failed: cannot create system directory");
-            return FALSE;
-        }
-        _MainLoopSramBuildPath(Path, sizeof(Path), FALSE);
-
-        ML_TRACE("SRAM save begin: rom='%s' bytes=%d sync=%d", _RomName, (int)nSramBytes, (int)bSync);
-        ML_TRACE("SRAM save path: %s", Path);
-        printf("[SRAM] save path='%s' nBytes=%d mcsaveready=%d first16=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X\n",
-               Path, (int)nSramBytes, (int)_MainLoop_bMCSaveReady,
-               pSRAM[0], pSRAM[1], pSRAM[2], pSRAM[3],
-               pSRAM[4], pSRAM[5], pSRAM[6], pSRAM[7],
-               pSRAM[8], pSRAM[9], pSRAM[10], pSRAM[11],
-               pSRAM[12], pSRAM[13], pSRAM[14], pSRAM[15]);
-
-        if (_MainLoop_bMCSaveReady)
-        {
-            /* Async path via the custom MCSAVE.IRX RPC server. Only
-               reachable when the IRX actually loaded (real PS2 with
-               the file shipped next to the ELF). */
-            MCSave_WriteSync(TRUE, NULL);
-            MCSave_Write((char *)Path, (char *)pSRAM, nSramBytes);
-
-            if (bSync)
-            {
-                int result;
-
-                MCSave_WriteSync(TRUE, &result);
-                ML_TRACE("SRAM save sync result: %d", result);
-                if (result)
-                {
-                    _MainLoop_SRAMUpdated = FALSE;
-                }
-                return result ? TRUE : FALSE;
-            }
-
+            *pbLegacy = TRUE;
+            ConPrint("SRAM loaded (MC-copy alias): %s\n", McCopyPath);
             return TRUE;
-        }
-        else
-        {
-            /* Sync fallback for NetherSX2 / any setup where
-               MCSAVE.IRX failed to load. Goes through newlib stdio
-               (fopen/fwrite/fclose) which routes to mcman/mcserv
-               via iomanX -- the same path _MainLoopLoadSRAM uses
-               for reads and the same path MemCardCreateSave used
-               at boot to write icon.sys / icon.icn into
-               mc0:/SNESticle/, so if the save directory exists at
-               all on the card then this write will reach it. */
-            Bool bOk = MemCardWriteFile(Path, pSRAM, nSramBytes);
-            ML_TRACE("SRAM save (memcard fallback): %d", (int)bOk);
-            if (bOk)
-            {
-                _MainLoop_SRAMUpdated = FALSE;
-            }
-            return bOk;
         }
     }
 
-    ML_TRACE("SRAM save skipped: no SRAM");
+    /* AURORA_SNES9X2010_V6_CD_SRAM_NOTICES_20260824: both SNES cores also import the original root-level save. */
+    if (_pSystem == _pSnes || _pSystem == _pSnes9x2010)
+    {
+        _MainLoopSramBuildPath(Path, sizeof(Path), pRoot, TRUE);
+        if (_MainLoopSramReadFile(Path, pSRAM, (Uint32)nSramBytes))
+        {
+            *pbLegacy = TRUE;
+            ConPrint("SRAM loaded (legacy): %s\n", Path);
+            return TRUE;
+        }
+
+        if (eDevice == MAINLOOP_SRAMDEVICE_USB)
+        {
+            _MainLoopSramBuildCopiedMcPath(
+                McCopyPath, sizeof(McCopyPath), pRoot, TRUE);
+
+            if (strcmp(McCopyPath, Path) != 0 &&
+                _MainLoopSramReadFile(
+                    McCopyPath, pSRAM, (Uint32)nSramBytes))
+            {
+                *pbLegacy = TRUE;
+                ConPrint(
+                    "SRAM loaded (legacy MC-copy alias): %s\n",
+                    McCopyPath
+                );
+                return TRUE;
+            }
+        }
+    }
+
     return FALSE;
 }
 
 void _MainLoopLoadSRAM()
 {
     Int32 nSramBytes = _pSystem ? _pSystem->GetSRAMBytes() : 0;
+    Uint8 *pSRAM = nSramBytes > 0 ? _pSystem->GetSRAMData() : NULL;
+    Bool bLoaded = FALSE;
+    Bool bLegacy = FALSE;
+    Bool bMcFallback = FALSE;
 
-    printf("[SRAM] LoadSRAM enter: pSystem=%p nSramBytes=%d romname='%s'\n",
-           (void *)_pSystem, (int)nSramBytes, _RomName);
-
-    if (nSramBytes > 0)
+    if (pSRAM && nSramBytes > 0)
     {
-        Char Path[1024];
-        Uint8 *pSRAM;
-        Bool bLegacyLoaded = FALSE;
-
-        pSRAM = _pSystem->GetSRAMData();
-        _MainLoopSramBuildPath(Path, sizeof(Path), FALSE);
-
-        printf("[SRAM] load path='%s' pSRAM=%p nBytes=%d\n",
-               Path, (void *)pSRAM, (int)nSramBytes);
-
-        ML_TRACE("SRAM load begin: rom='%s' bytes=%d", _RomName, (int)nSramBytes);
-        ML_TRACE("SRAM load path: %s", Path);
-
-        Bool bOk = pSRAM ? MemCardReadFile(Path, pSRAM, nSramBytes) : FALSE;
-        printf("[SRAM] MemCardReadFile -> %d\n", (int)bOk);
-
-        /* v1.0.3 and early v1.0.4 builds stored SNES SRAM directly in
-           mc?:/SNESticle. Read that file only as a fallback. It is never
-           deleted; marking SRAM dirty migrates a copy to SNES/ the next
-           time the user opens the in-game menu. NES had no old SRAM. */
-        if (!bOk && _pSystem == _pSnes)
+        if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
         {
-            Char LegacyPath[1024];
-            _MainLoopSramBuildPath(LegacyPath, sizeof(LegacyPath), TRUE);
-            bOk = MemCardReadFile(LegacyPath, pSRAM, nSramBytes);
-            if (bOk)
-            {
-                bLegacyLoaded = TRUE;
-                snprintf(Path, sizeof(Path), "%s", LegacyPath);
-                printf("[SRAM] legacy SNES save loaded; migration pending\n");
-            }
+            if (_MainLoopSramUsbReady())
+                bLoaded = _MainLoopLoadSRAMFrom(
+                    MAINLOOP_SRAMDEVICE_USB, pSRAM, nSramBytes, &bLegacy);
         }
-
-        if (bOk)
+        else if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
         {
-            _MainLoop_SRAMChecksum = _CalcChecksum((Uint32 *)pSRAM, nSramBytes / 4);
-            ConPrint("SRAM loaded: %s\n", Path);
-            printf("[SRAM] load OK checksum=%08X first16=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X\n",
-                   (unsigned int)_MainLoop_SRAMChecksum,
-                   pSRAM[0], pSRAM[1], pSRAM[2], pSRAM[3],
-                   pSRAM[4], pSRAM[5], pSRAM[6], pSRAM[7],
-                   pSRAM[8], pSRAM[9], pSRAM[10], pSRAM[11],
-                   pSRAM[12], pSRAM[13], pSRAM[14], pSRAM[15]);
-            ML_TRACE("SRAM load checksum: %08X", (unsigned int)_MainLoop_SRAMChecksum);
+            bLoaded = _MainLoopLoadSRAMFrom(
+                MAINLOOP_SRAMDEVICE_MEMCARD, pSRAM, nSramBytes, &bLegacy);
         }
         else
         {
-            printf("[SRAM] load FAILED path='%s' (file missing or short read)\n", Path);
-            ML_TRACE("SRAM load failed or file missing: %s", Path);
+            if (_MainLoopSramUsbReady())
+                bLoaded = _MainLoopLoadSRAMFrom(
+                    MAINLOOP_SRAMDEVICE_USB, pSRAM, nSramBytes, &bLegacy);
+
+            if (!bLoaded)
+            {
+                Bool bMcLegacy = FALSE;
+                bLoaded = _MainLoopLoadSRAMFrom(
+                    MAINLOOP_SRAMDEVICE_MEMCARD, pSRAM, nSramBytes, &bMcLegacy);
+                if (bLoaded)
+                {
+                    bLegacy = bMcLegacy;
+                    bMcFallback = TRUE;
+                }
+            }
         }
 
-        /* Always initialise the checksum, including a brand-new NES save,
-           so bytes left by the previously loaded cartridge cannot affect
-           dirty detection. Legacy SNES data is copied on the next save. */
-        if (pSRAM)
-        {
-            _MainLoop_SRAMChecksum = _CalcChecksum(
-                (Uint32 *)pSRAM,
-                nSramBytes / 4
-            );
-        }
-        _MainLoop_SRAMUpdated = bLegacyLoaded;
+        _MainLoop_SRAMChecksum =
+            _CalcChecksum((Uint32 *)pSRAM, nSramBytes / 4);
+
+        /* Never delete the source. Mark only for copy/migration. */
+        _MainLoop_SRAMUpdated = bLoaded &&
+            (bLegacy || (bMcFallback && _MainLoopSramUsbReady()));
     }
+
+    /* AURORA_QN_TURBOFILE_SAVE_V2_20260828: loading an existing
+     * TurboFile.sav never creates one and never marks it dirty. */
+    if (_pSystem == _pNes)
+    {
+        _MainLoopLoadTurboFile();
+        _MainLoopLoadBattleBox();
+    }
+
+    if (_pSystem == _pSnes)
+        _MainLoopLoadSnesTurboFile();
 
     _MainLoop_SaveCounter = 0;
     _bStateSaved = FALSE;
@@ -345,6 +1355,9 @@ Bool _MainLoopForceCheckSRAM()
         Uint8 *pSRAM = _pSystem->GetSRAMData();
         Uint32 uChecksum;
 
+        /* AURORA_RUNTIME_SAFE_SRAM_PTR_V1_4_1 */
+        if (!pSRAM)
+            return FALSE;
         uChecksum = _CalcChecksum((Uint32 *)pSRAM, nSramBytes / 4);
 
         if (_MainLoop_SRAMChecksum != uChecksum)
@@ -359,12 +1372,61 @@ Bool _MainLoopForceCheckSRAM()
         }
     }
 
+    /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901
+     * Game Pak SRAM writes mark themselves dirty immediately; no full second
+     * SRAM checksum is added to menu entry or gameplay. */
+    if (_pSystem == _pSnes && _pSnes &&
+        _pSnes->IsSuperWildCard() &&
+        (_pSnes->IsSuperWildCardCartridgeSRAMDirty() ||
+         s_SwcCartSRAMMigrationPending))
+        _MainLoop_SRAMUpdated = TRUE;
+
+    /* AURORA_QN_TURBOFILE_SAVE_V2_20260828: protocol writes set their
+     * dirty bit immediately, so no 8 KiB checksum polling is required. */
+    if (_pSystem == _pNes &&
+        QuicknesBridge_TurboFileEnabled() &&
+        QuicknesBridge_TurboFileDirty())
+        _MainLoop_SRAMUpdated = TRUE;
+
+    if (_pSystem == _pNes &&
+        QuicknesBridge_BattleBoxEnabled() &&
+        QuicknesBridge_BattleBoxDirty())
+        _MainLoop_SRAMUpdated = TRUE;
+
+    if (_pSystem == _pSnes &&
+        SnesTurboFileEnabled() &&
+        SnesTurboFileDirty())
+        _MainLoop_SRAMUpdated = TRUE;
+
     return TRUE;
 }
 
 Bool _MainLoopCheckSRAM()
 {
     Int32 nSramBytes = _pSystem ? _pSystem->GetSRAMBytes() : 0;
+
+    /* AURORA_MEGA_V2_SNES_SRAM_NO_POLL
+       SNES SRAM is force-checked immediately when the in-game menu
+       opens, before the save decision. Therefore a 30-frame full
+       memory sweep during gameplay is redundant and can create a
+       small periodic EE workload spike on large SRAM carts. */
+    if (_pSystem == _pSnes)
+    {
+        /* AURORA_SNES_TURBOFILE_V4_20260829
+         * External protocol writes already maintain a dirty boolean.
+         * Keep the normal no-checksum SNES path, but expose that O(1)
+         * dirty state to the existing deterministic menu-save flow. */
+        if (SnesTurboFileEnabled() && SnesTurboFileDirty())
+            _MainLoop_SRAMUpdated = TRUE;
+
+        /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901: O(1) physical-cart dirty state. */
+        if (_pSnes && _pSnes->IsSuperWildCard() &&
+            (_pSnes->IsSuperWildCardCartridgeSRAMDirty() ||
+             s_SwcCartSRAMMigrationPending))
+            _MainLoop_SRAMUpdated = TRUE;
+
+        return TRUE;
+    }
 
     if (nSramBytes > 0)
     {
@@ -409,6 +1471,9 @@ Bool _MainLoopCheckSRAM()
 
         Uint8 *pSRAM = _pSystem->GetSRAMData();
         Uint32 uChecksum;
+
+        if (!pSRAM)
+            return FALSE;
 
         PROF_ENTER("_MainLoopCheckSRAM");
 
@@ -459,6 +1524,11 @@ Bool _MainLoopCheckSRAM()
 #define MAINLOOP_STATE_PAYLOAD_DEFLATE 1
 #define MAINLOOP_STATE_SYSTEM_SNES      0
 #define MAINLOOP_STATE_SYSTEM_NES       1
+#define MAINLOOP_STATE_SYSTEM_SEGA      2
+#define MAINLOOP_STATE_SYSTEM_PCE       3
+#define MAINLOOP_STATE_SYSTEM_SNES9X2010 4 /* AURORA_SNES9X2010_V1 */
+#define MAINLOOP_STATE_SYSTEM_FDS       5 /* AURORA_FCEUMM_FDS_V0_6_STATE */
+#define MAINLOOP_STATE_SYSTEM_SWC       6 /* AURORA_SWC_FLOPPY_V4_20260831 */
 #define MAINLOOP_STATE_RAW_BYTES \
     (sizeof(SnesStateT) > sizeof(NesStateT) \
         ? sizeof(SnesStateT) \
@@ -531,13 +1601,122 @@ static const Uint8 _MainLoop_StateConfigMagic[8] =
 static MainLoopStateDeviceE _MainLoop_StateDevice = MAINLOOP_STATEDEVICE_AUTO;
 static Int32 _MainLoop_StateSlot = 0;
 static Bool _MainLoop_StateDeviceChosen = FALSE;
-static Char _MainLoop_StateLastMessage[192] = "No save-state operation yet.";
+static Char _MainLoop_StateLastMessage[192] = "尚未进行存档操作。";
 static Char _MainLoop_StateAvailability[192];
 static Bool _MainLoop_StateRomCRCValid = FALSE;
 static Uint32 _MainLoop_StateRomCRC = 0;
 static MainLoopStateCandidateT _MainLoop_StateCandidates[MAINLOOP_STATE_MAX_CANDIDATES];
 static Uint8 _MainLoop_StateCompressed[MAINLOOP_STATE_COMPRESS_BYTES]
     __attribute__((aligned(64)));
+
+/* AURORA_PICODRIVE_STAGE2_DYNAMIC_STATE
+ * Never tax SNES/NES BSS for PicoDrive's variable-size state. These buffers
+ * appear only after a Sega state operation and are released on ROM change. */
+static Uint8 *_MainLoop_SegaStateData = NULL;
+static Uint32 _MainLoop_SegaStateCapacity = 0;
+static Uint8 *_MainLoop_SegaCompressed = NULL;
+static Uint32 _MainLoop_SegaCompressedCapacity = 0;
+
+static Bool _MainLoopStateIsSwc()
+{
+    return (_pSystem == _pSnes && _pSnes &&
+            _pSnes->IsSuperWildCard()) ? TRUE : FALSE;
+}
+/* AURORA_SWC_FLOPPY_V4_20260831 */
+
+static void _MainLoopStateReleaseSegaScratch()
+{
+    if (_MainLoop_SegaStateData) free(_MainLoop_SegaStateData);
+    if (_MainLoop_SegaCompressed) free(_MainLoop_SegaCompressed);
+    _MainLoop_SegaStateData = NULL;
+    _MainLoop_SegaStateCapacity = 0;
+    _MainLoop_SegaCompressed = NULL;
+    _MainLoop_SegaCompressedCapacity = 0;
+}
+
+/* AURORA_PD_STATE_SCRATCH_RELEASE_V3
+ *
+ * PicoDrive state data is temporary working memory. Keep the raw state and
+ * optional compression buffer alive for the whole Save/Load operation, then
+ * release them automatically on every exit path. This avoids leaving both
+ * buffers pinned on the 32 MiB EE heap after a Sega state operation.
+ */
+class MainLoopSegaStateScratchGuard
+{
+public:
+    MainLoopSegaStateScratchGuard()
+        : m_bActive((_pSystem == _pSega || _pSystem == _pPce ||
+                     _pSystem == _pFds || /* AURORA_FCEUMM_FDS_V0_6_STATE */
+                     _pSystem == _pSnes9x2010 ||
+                     _MainLoopStateIsSwc()) ? TRUE : FALSE)
+    {
+    }
+
+    ~MainLoopSegaStateScratchGuard()
+    {
+        if (m_bActive)
+            _MainLoopStateReleaseSegaScratch();
+    }
+
+private:
+    Bool m_bActive;
+
+    MainLoopSegaStateScratchGuard(
+        const MainLoopSegaStateScratchGuard &);
+    MainLoopSegaStateScratchGuard &operator=(
+        const MainLoopSegaStateScratchGuard &);
+};
+
+static Uint8 *_MainLoopStateEnsureSegaStateData(Uint32 nBytes)
+{
+    if (!nBytes)
+        return NULL;
+    if (_MainLoop_SegaStateCapacity < nBytes)
+    {
+        void *p = realloc(_MainLoop_SegaStateData, nBytes);
+        if (!p)
+            return NULL;
+        _MainLoop_SegaStateData = (Uint8 *)p;
+        _MainLoop_SegaStateCapacity = nBytes;
+    }
+    return _MainLoop_SegaStateData;
+}
+
+static Uint32 _MainLoopStateCompressedLimit(Uint32 nRawBytes)
+{
+    if (_pSystem != _pSega && _pSystem != _pPce &&
+        _pSystem != _pFds && /* AURORA_FCEUMM_FDS_V0_6_STATE */
+        _pSystem != _pSnes9x2010 && !_MainLoopStateIsSwc())
+        return (Uint32)sizeof(_MainLoop_StateCompressed);
+
+    unsigned long long n =
+        ((unsigned long long)nRawBytes * 110ULL) / 100ULL + 128ULL;
+    return n <= 0xffffffffULL ? (Uint32)n : 0;
+}
+
+static Uint8 *_MainLoopStateGetCompressedBuffer(Uint32 nNeed, Uint32 *pCapacity)
+{
+    if (_pSystem != _pSega && _pSystem != _pPce &&
+        _pSystem != _pFds && /* AURORA_FCEUMM_FDS_V0_6_STATE */
+        _pSystem != _pSnes9x2010 && !_MainLoopStateIsSwc())
+    {
+        if (pCapacity) *pCapacity = (Uint32)sizeof(_MainLoop_StateCompressed);
+        return _MainLoop_StateCompressed;
+    }
+
+    if (!nNeed)
+        return NULL;
+    if (_MainLoop_SegaCompressedCapacity < nNeed)
+    {
+        void *p = realloc(_MainLoop_SegaCompressed, nNeed);
+        if (!p)
+            return NULL;
+        _MainLoop_SegaCompressed = (Uint8 *)p;
+        _MainLoop_SegaCompressedCapacity = nNeed;
+    }
+    if (pCapacity) *pCapacity = _MainLoop_SegaCompressedCapacity;
+    return _MainLoop_SegaCompressed;
+}
 static Int32 _MainLoop_StateUnformattedCard = -1;
 static Char _MainLoop_StateConfigPath[1024] = "";
 
@@ -547,23 +1726,79 @@ static void _MainLoopStateLoadSettingsFromRomDevice();
 
 static Uint32 _MainLoopStateGetSystemId()
 {
-    return _pSystem == _pNes
-        ? MAINLOOP_STATE_SYSTEM_NES
-        : MAINLOOP_STATE_SYSTEM_SNES;
+    if (_pSystem == _pNes)  return MAINLOOP_STATE_SYSTEM_NES;
+    if (_pSystem == _pSega) return MAINLOOP_STATE_SYSTEM_SEGA;
+    if (_pSystem == _pPce)  return MAINLOOP_STATE_SYSTEM_PCE;
+    if (_pSystem == _pFds)  return MAINLOOP_STATE_SYSTEM_FDS; /* AURORA_FCEUMM_FDS_V0_6_STATE */
+    if (_pSystem == _pSnes9x2010) return MAINLOOP_STATE_SYSTEM_SNES9X2010;
+    if (_MainLoopStateIsSwc()) return MAINLOOP_STATE_SYSTEM_SWC;
+    return MAINLOOP_STATE_SYSTEM_SNES;
 }
 
 static Uint32 _MainLoopStateGetPayloadBytes()
 {
-    return _pSystem == _pNes
-        ? (Uint32)sizeof(_NesState)
-        : (Uint32)sizeof(_SnesState);
+    if (_MainLoopStateIsSwc())
+    {
+        Int32 nBytes = _pSnes->GetStateSize();
+        return nBytes > 0 ? (Uint32)nBytes : 0;
+    }
+    /* AURORA_PICODRIVE_STAGE2_STATE_SIZE */
+    if (_pSystem == _pSega)
+    {
+        Int32 nBytes = _pSega ? _pSega->GetStateSize() : 0;
+        return nBytes > 0 ? (Uint32)nBytes : 0;
+    }
+    if (_pSystem == _pFds)
+    {
+        /* AURORA_FCEUMM_FDS_V0_6_STATE: dynamic FCEUmm FDS snapshot. */
+        Int32 nBytes = _pFds ? _pFds->GetStateSize() : 0;
+        return nBytes > 0 ? (Uint32)nBytes : 0;
+    }
+    if (_pSystem == _pPce)
+    {
+        Int32 nBytes = _pPce ? _pPce->GetStateSize() : 0;
+        return nBytes > 0 ? (Uint32)nBytes : 0;
+    }
+    if (_pSystem == _pSnes9x2010)
+    {
+        Int32 nBytes = _pSnes9x2010 ? _pSnes9x2010->GetStateSize() : 0;
+        return nBytes > 0 ? (Uint32)nBytes : 0;
+    }
+    if (_pSystem == _pNes)
+    {
+        /*
+         * Let the active NES implementation describe its state envelope.
+         *
+         * InfoNES deliberately returns sizeof(NesStateT), preserving its
+         * existing file format. QuickNES returns its compact native envelope.
+         */
+        Int32 nBytes = _pNes ? _pNes->GetStateSize() : 0;
+
+        if (nBytes > 0 && nBytes <= (Int32)sizeof(_NesState))
+        {
+            return (Uint32)nBytes;
+        }
+
+        /* Defensive compatibility fallback. */
+        return (Uint32)sizeof(_NesState);
+    }
+
+    return (Uint32)sizeof(_SnesState);
 }
 
 static Uint8 *_MainLoopStateGetPayloadData()
 {
-    return _pSystem == _pNes
-        ? (Uint8 *)&_NesState
-        : (Uint8 *)&_SnesState;
+    if (_MainLoopStateIsSwc())
+        return _MainLoopStateEnsureSegaStateData(
+            _MainLoopStateGetPayloadBytes());
+    if (_pSystem == _pNes)
+        return (Uint8 *)&_NesState;
+    if (_pSystem == _pSega || _pSystem == _pPce ||
+        _pSystem == _pFds || /* AURORA_FCEUMM_FDS_V0_6_STATE */
+        _pSystem == _pSnes9x2010)
+        return _MainLoopStateEnsureSegaStateData(
+            _MainLoopStateGetPayloadBytes());
+    return (Uint8 *)&_SnesState;
 }
 
 static void _MainLoopStateSetMessage(const Char *pFormat, ...)
@@ -582,6 +1817,8 @@ static void _MainLoopStateSetMessage(const Char *pFormat, ...)
 
 void MainLoopStateOnRomChanged()
 {
+    /* AURORA_PICODRIVE_STAGE2_RELEASE_STATE */
+    _MainLoopStateReleaseSegaScratch();
     _MainLoop_StateRomCRCValid = FALSE;
     _MainLoop_StateRomCRC = 0;
     _MainLoop_StateUnformattedCard = -1;
@@ -594,6 +1831,15 @@ void MainLoopStateOnRomChanged()
     {
         _MainLoopStateLoadSettingsFromRomDevice();
     }
+}
+
+/* AURORA_PD_MEGA_FIX_20260820
+ * Called immediately after MainLoopStateOnRomChanged(), with the CRC taken
+ * before the active core can transform the shared ROM buffer. */
+void MainLoopStatePrimeRomIdentityCRC(Uint32 uCRC)
+{
+    _MainLoop_StateRomCRC = uCRC;
+    _MainLoop_StateRomCRCValid = TRUE;
 }
 
 Int32 MainLoopStateGetSlot()
@@ -611,10 +1857,10 @@ const Char *MainLoopStateGetDeviceName()
     switch (_MainLoop_StateDevice)
     {
         case MAINLOOP_STATEDEVICE_USB:     return "USB";
-        case MAINLOOP_STATEDEVICE_MEMCARD: return "Memory Card";
+        case MAINLOOP_STATEDEVICE_MEMCARD: return "记忆卡";
         case MAINLOOP_STATEDEVICE_MMCE:    return "MMCE";
-        case MAINLOOP_STATEDEVICE_HDD:     return "Internal HDD";
-        default:                           return "Auto";
+        case MAINLOOP_STATEDEVICE_HDD:     return "内置硬盘";
+        default:                           return "自动";
     }
 }
 
@@ -740,34 +1986,6 @@ static Bool _MainLoopStateConfigPathIsWritable(const Char *pPath)
            strncmp(pPath, "rom", 3);
 }
 
-/* Optional filesystems are not resident during boot anymore.  Reads must be
-   side-effect free (state.cfg discovery must never start USB); writes happen
-   only after an explicit user action and may start the selected USB stack. */
-static Bool _MainLoopStatePathDeviceReady(const Char *pPath, Bool bStart)
-{
-    if (!pPath)
-    {
-        return FALSE;
-    }
-
-    if (!strncmp(pPath, "mass", 4))
-    {
-        if (UsbBdmIsLoaded() || Mx4sioIsLoaded())
-        {
-            return TRUE;
-        }
-        return bStart && MassStorageIsEnabled() &&
-               UsbBdmLoadEmbeddedIrx() >= 0;
-    }
-
-    if (!strncmp(pPath, "cdfs:", 6) || !strncmp(pPath, "cdrom", 5))
-    {
-        return CdfsIsLoaded() ? TRUE : FALSE;
-    }
-
-    return TRUE;
-}
-
 static Bool _MainLoopStateConfigMapPath(
     const Char *pPath,
     Char *pMapped,
@@ -819,8 +2037,7 @@ static Bool _MainLoopStateConfigRead(
     FILE *pFile;
     size_t nRead;
 
-    if (!_MainLoopStatePathDeviceReady(pPath, FALSE) ||
-        !_MainLoopStateConfigMapPath(
+    if (!_MainLoopStateConfigMapPath(
             pPath,
             MappedPath,
             sizeof(MappedPath)))
@@ -860,7 +2077,6 @@ static Bool _MainLoopStateConfigWrite(
     Bool bOK;
 
     if (!_MainLoopStateConfigPathIsWritable(pPath) ||
-        !_MainLoopStatePathDeviceReady(pPath, TRUE) ||
         !_MainLoopStateConfigMapPath(
             pPath,
             MappedPath,
@@ -1194,16 +2410,40 @@ static void _MainLoopStateDeleteSettings()
 
 static const Char *_MainLoopStateGetUnsupportedChip(Uint32 uFlags)
 {
-    if (uFlags & SNROM_FLAG_SUPERFX) return "SuperFX";
+    /* AURORA_SPECIAL_CHIP_STATE_V1
+     * DSP-1/2/4, OBC1, SuperFX, S-DD1 and S-RTC have a tagged snapshot in
+     * the unused SRAM-state tail. Keep refusing them only if the current
+     * cartridge cannot fit that envelope safely. */
     if (uFlags & SNROM_FLAG_GAMEBOY) return "Super Game Boy";
-    if (uFlags & SNROM_FLAG_DSP1)    return "DSP-1";
-    if (uFlags & SNROM_FLAG_DSP2)    return "DSP-2";
     if (uFlags & SNROM_FLAG_DSP3)    return "DSP-3";
-    if (uFlags & SNROM_FLAG_DSP4)    return "DSP-4";
-    if (uFlags & SNROM_FLAG_OBC1)    return "OBC1";
-    if (uFlags & SNROM_FLAG_CX4)     return "CX4";
-    if (uFlags & SNROM_FLAG_SDD1)    return "S-DD1";
-    if (uFlags & SNROM_FLAG_SRTC)    return "S-RTC";
+
+    if ((uFlags & SNROM_FLAG_SUPERFX) &&
+        (!_pSnes || !_pSnes->CanSerializeSpecialChipState()))
+        return "SuperFX";
+    if ((uFlags & SNROM_FLAG_DSP1) &&
+        (!_pSnes || !_pSnes->CanSerializeSpecialChipState()))
+        return "DSP-1";
+    if ((uFlags & SNROM_FLAG_DSP2) &&
+        (!_pSnes || !_pSnes->CanSerializeSpecialChipState()))
+        return "DSP-2";
+    if ((uFlags & SNROM_FLAG_DSP4) &&
+        (!_pSnes || !_pSnes->CanSerializeSpecialChipState()))
+        return "DSP-4";
+    if ((uFlags & SNROM_FLAG_OBC1) &&
+        (!_pSnes || !_pSnes->CanSerializeSpecialChipState()))
+        return "OBC1";
+    if ((uFlags & SNROM_FLAG_SDD1) &&
+        (!_pSnes || !_pSnes->CanSerializeSpecialChipState()))
+        return "S-DD1";
+    if ((uFlags & SNROM_FLAG_SRTC) &&
+        (!_pSnes || !_pSnes->CanSerializeSpecialChipState()))
+        return "S-RTC";
+
+    /* Existing CX4 format/offset is intentionally unchanged. */
+    if ((uFlags & SNROM_FLAG_CX4) &&
+        (!_pSnes || !_pSnes->CanSerializeCX4State()))
+        return "CX4";
+
     return NULL;
 }
 
@@ -1214,13 +2454,16 @@ static Bool _MainLoopStateCheckAvailability(Char *pReason, Int32 nReasonBytes)
 
     if (!_pSystem)
     {
-        snprintf(pReason, nReasonBytes, "No game loaded.");
+        snprintf(pReason, nReasonBytes, "未加载游戏。");
         return FALSE;
     }
 
-    if (_pSystem != _pSnes && _pSystem != _pNes)
+    if (_pSystem != _pSnes && _pSystem != _pNes &&
+        _pSystem != _pSega && _pSystem != _pPce &&
+        _pSystem != _pFds && /* AURORA_FCEUMM_FDS_V0_6_STATE */
+        _pSystem != _pSnes9x2010)
     {
-        snprintf(pReason, nReasonBytes, "This system cannot save states.");
+        snprintf(pReason, nReasonBytes, "该系统不支持即时存档。");
         return FALSE;
     }
 
@@ -1230,29 +2473,95 @@ static Bool _MainLoopStateCheckAvailability(Char *pReason, Int32 nReasonBytes)
             !_pNes || !_pNes->IsRomReady())
         {
             snprintf(pReason, nReasonBytes,
-                     "NES state unavailable for this cartridge/mapper.");
+                     "该卡带/映射器不支持NES存档。");
+            return FALSE;
+        }
+    }
+    else if (_pSystem == _pFds)
+    {
+        /* AURORA_FCEUMM_FDS_V0_6_STATE */
+        if (!_pFds || !_pFds->IsRomReady() || _pFds->GetStateSize() <= 0)
+        {
+            snprintf(pReason, nReasonBytes, "FCEUmm FDS存档不可用。");
+            return FALSE;
+        }
+    }
+    else if (_pSystem == _pSega)
+    {
+        /* AURORA_PICODRIVE_STAGE2_STATE_AVAILABLE */
+        if (!_pSegaRom || !_pSegaRom->IsLoaded() ||
+            !_pSega || !_pSega->IsRomReady())
+        {
+            snprintf(pReason, nReasonBytes, "PicoDrive存档不可用。");
+            return FALSE;
+        }
+    }
+    else if (_pSystem == _pPce)
+    {
+        if (!_pPceRom || !_pPceRom->IsLoaded() || !_pPce || !_pPce->IsRomReady())
+        {
+            snprintf(pReason, nReasonBytes, "Beetle PCE Fast存档不可用。");
+            return FALSE;
+        }
+    }
+    else if (_pSystem == _pSnes9x2010)
+    {
+        if (!_pSnes9x2010Rom || !_pSnes9x2010Rom->IsLoaded() ||
+            !_pSnes9x2010 || !_pSnes9x2010->IsRomReady())
+        {
+            snprintf(pReason, nReasonBytes, "Snes9x 2010存档不可用。");
+            return FALSE;
+        }
+    }
+    else if (_MainLoopStateIsSwc())
+    {
+        /* AURORA_SWC_FLOPPY_V5_20260831
+         * External cartridge ROM is not embedded in V5 states. */
+        if (_pSnes->HasSuperWildCardCartridge())
+        {
+            snprintf(
+                pReason, nReasonBytes,
+                "SWC外接卡带状态暂不支持序列化。");
+            return FALSE;
+        }
+
+        /* AURORA_SWC_MEGA_V9_20260831: V5 allowed BIOS-only boot, but a SWC state identifies
+         * and remounts a concrete floppy image. Do not advertise a state that
+         * cannot be restored consistently. */
+        if (!_pSnes->HasSuperWildCardDisk())
+        {
+            snprintf(
+                pReason, nReasonBytes,
+                "使用即时存档前请先插入Super Wild Card磁盘。");
+            return FALSE;
+        }
+
+        if (_pSnes->GetStateSize() <= (Int32)sizeof(SnesStateT))
+        {
+            snprintf(pReason, nReasonBytes,
+                     "Super Wild Card状态扩展不可用。");
             return FALSE;
         }
     }
     else if (!_pSnesRom || !_pSnesRom->IsLoaded())
     {
-        snprintf(pReason, nReasonBytes, "No SNES ROM loaded.");
+        snprintf(pReason, nReasonBytes, "未加载SNES ROM。");
         return FALSE;
     }
 
-    pChip = _pSystem == _pSnes
+    pChip = (_pSystem == _pSnes && !_MainLoopStateIsSwc())
         ? _MainLoopStateGetUnsupportedChip(_pSnesRom->m_Flags)
         : NULL;
     if (pChip)
     {
-        snprintf(pReason, nReasonBytes, "%s state is not serialized yet.", pChip);
+        snprintf(pReason, nReasonBytes, "%s状态暂不支持序列化。", pChip);
         return FALSE;
     }
 
     if (s_pMovieClip &&
         (s_pMovieClip->IsRecording() || s_pMovieClip->IsPlaying()))
     {
-        snprintf(pReason, nReasonBytes, "Stop movie recording/playback first.");
+        snprintf(pReason, nReasonBytes, "请先停止录像录制或回放。");
         return FALSE;
     }
 
@@ -1261,17 +2570,28 @@ static Bool _MainLoopStateCheckAvailability(Char *pReason, Int32 nReasonBytes)
     if (NetStatus.eServerStatus != NETPLAY_STATUS_IDLE ||
         NetStatus.eClientStatus != NETPLAY_STATUS_IDLE)
     {
-        snprintf(pReason, nReasonBytes, "Save states are disabled during netplay.");
+        snprintf(pReason, nReasonBytes, "联机对战期间已停用即时存档。");
         return FALSE;
     }
 
-    snprintf(
-        pReason,
-        nReasonBytes,
-        _pSystem == _pNes
-            ? "Ready: NES cartridge and mapper state."
-            : "Ready: base SNES hardware."
-    );
+    if (_MainLoopStateIsSwc())
+        snprintf(pReason, nReasonBytes, "就绪: Super Wild Card + DRAM/FDC状态。");
+    else if (_pSystem == _pSega)
+        snprintf(pReason, nReasonBytes, "就绪: PicoDrive卡带状态。");
+    else if (_pSystem == _pPce)
+        snprintf(pReason, nReasonBytes, "就绪: PC Engine HuCard状态。");
+    else if (_pSystem == _pFds)
+        snprintf(pReason, nReasonBytes, "就绪: Famicom Disk System状态。"); /* AURORA_FCEUMM_FDS_V0_6_STATE */
+    else if (_pSystem == _pSnes9x2010)
+        snprintf(pReason, nReasonBytes, "就绪: Snes9x 2010 SNES状态。");
+    else
+        snprintf(
+            pReason,
+            nReasonBytes,
+            _pSystem == _pNes
+                ? "就绪: NES卡带与映射器状态。"
+                : "就绪: SNES基本硬件。"
+        );
     return TRUE;
 }
 
@@ -1284,13 +2604,73 @@ const Char *MainLoopStateGetAvailability()
     return _MainLoop_StateAvailability;
 }
 
+/* AURORA_SWC_FLOPPY_V4_20260831
+ * NAME_1.img, NAME_2.img, ... share one state namespace: NAME. */
+static Bool _MainLoopStateGetSwcBaseName(Char *pOut, Int32 nOutBytes)
+{
+    const Char *pPath;
+    const Char *pName;
+    const Char *pExt;
+    size_t n;
+    size_t i;
+
+    if (!pOut || nOutBytes <= 1 || !_MainLoopStateIsSwc())
+        return FALSE;
+
+    pPath = _pSnes->GetSuperWildCardDiskPath();
+    if (!pPath || !*pPath)
+        return FALSE;
+
+    pName = pPath;
+    for (const Char *p = pPath; *p; ++p)
+        if (*p == '/' || *p == '\\')
+            pName = p + 1;
+
+    pExt = strrchr(pName, '.');
+    n = pExt ? (size_t)(pExt - pName) : strlen(pName);
+    if (!n || n >= (size_t)nOutBytes)
+        return FALSE;
+
+    memcpy(pOut, pName, n);
+    pOut[n] = 0;
+
+    i = n;
+    while (i > 0 && pOut[i - 1] >= '0' && pOut[i - 1] <= '9')
+        --i;
+    if (i > 0 && i < n && pOut[i - 1] == '_')
+        pOut[i - 1] = 0;
+
+    return pOut[0] ? TRUE : FALSE;
+}
+
 static Bool _MainLoopStateGetRomIdentity(
     Uint32 *puCRC,
     Uint32 *pnBytes,
     Uint32 *puFlags)
 {
-    Uint8 *pRomData;
+    Uint8 *pRomData = NULL; /* AURORA_FCEUMM_FDS_V0_6_STATE */
     Uint32 nRomBytes;
+    if (_MainLoopStateIsSwc())
+    {
+        Char BaseName[256];
+        Uint32 uIdentity;
+
+        if (!_MainLoopStateGetSwcBaseName(BaseName, sizeof(BaseName)))
+            return FALSE;
+
+        uIdentity = (Uint32)mz_crc32(
+            MZ_CRC32_INIT,
+            (const unsigned char *)BaseName,
+            strlen(BaseName));
+
+        _MainLoop_StateRomCRC = uIdentity;
+        _MainLoop_StateRomCRCValid = TRUE;
+        *puCRC = uIdentity;
+        *pnBytes = 0x4000u;
+        *puFlags = 0x53574304u;
+        return TRUE;
+    }
+
 
     if (_pSystem == _pNes)
     {
@@ -1301,6 +2681,38 @@ static Bool _MainLoopStateGetRomIdentity(
         pRomData = _pNesRom->GetData();
         nRomBytes = _pNesRom->GetBytes();
     }
+    else if (_pSystem == _pFds)
+    {
+        /* AURORA_FCEUMM_FDS_V0_6_STATE: full-path FDS has no frontend ROM buffer. */
+        if (!_pFds || !_pFds->IsRomReady() || !_pFds->GetContentBytes())
+            return FALSE;
+        nRomBytes = _pFds->GetContentBytes();
+        if (!_MainLoop_StateRomCRCValid)
+        {
+            _MainLoop_StateRomCRC = _pFds->GetContentCRC();
+            _MainLoop_StateRomCRCValid = TRUE;
+        }
+    }
+    else if (_pSystem == _pSega)
+    {
+        /* AURORA_PICODRIVE_STAGE2_ROM_ID */
+        if (!_pSegaRom || !_pSegaRom->IsLoaded())
+            return FALSE;
+        pRomData = _pSegaRom->GetData();
+        nRomBytes = _pSegaRom->GetBytes();
+    }
+    else if (_pSystem == _pPce)
+    {
+        if (!_pPceRom || !_pPceRom->IsLoaded()) return FALSE;
+        pRomData = _pPceRom->GetData(); nRomBytes = _pPceRom->GetBytes();
+    }
+    else if (_pSystem == _pSnes9x2010)
+    {
+        if (!_pSnes9x2010Rom || !_pSnes9x2010Rom->IsLoaded()) return FALSE;
+        /* AURORA_SNES9X2010_V2_PS2LEAN_20260824: frontend backing is intentionally released. */
+        pRomData = _pSnes9x2010Rom->GetData();
+        nRomBytes = _pSnes9x2010Rom->GetBytes();
+    }
     else if (_pSnesRom && _pSnesRom->IsLoaded())
     {
         pRomData = _pSnesRom->GetData();
@@ -1310,13 +2722,16 @@ static Bool _MainLoopStateGetRomIdentity(
     {
         return FALSE;
     }
-    if (!pRomData || !nRomBytes)
+    if (!nRomBytes)
     {
         return FALSE;
     }
 
     if (!_MainLoop_StateRomCRCValid)
     {
+        /* AURORA_SNES9X2010_V2_PS2LEAN_20260824: only a non-primed fallback CRC needs raw bytes. */
+        if (!pRomData)
+            return FALSE;
         _MainLoop_StateRomCRC = (Uint32)mz_crc32(
             MZ_CRC32_INIT,
             pRomData,
@@ -1327,9 +2742,14 @@ static Bool _MainLoopStateGetRomIdentity(
 
     *puCRC = _MainLoop_StateRomCRC;
     *pnBytes = nRomBytes;
-    *puFlags = _pSystem == _pNes
-        ? _pNesRom->GetMapperNumber()
-        : _pSnesRom->m_Flags;
+    if (_pSystem == _pNes)
+        *puFlags = _pNesRom->GetMapperNumber();
+    else if (_pSystem == _pSega || _pSystem == _pPce ||
+             _pSystem == _pFds || /* AURORA_FCEUMM_FDS_V0_6_STATE */
+             _pSystem == _pSnes9x2010)
+        *puFlags = 0;
+    else
+        *puFlags = _pSnesRom->m_Flags;
     return TRUE;
 }
 
@@ -1509,7 +2929,6 @@ static Int32 _MainLoopStateBuildRoots(
     Int32 nRoots = 0;
     Char Root[16];
     Bool bAuto = eDevice == MAINLOOP_STATEDEVICE_AUTO;
-    Bool bMassReady = UsbBdmIsLoaded() || Mx4sioIsLoaded();
     Int32 iMMCESlots = 0;
 
     if ((bAuto || eDevice == MAINLOOP_STATEDEVICE_MMCE) &&
@@ -1542,7 +2961,7 @@ static Int32 _MainLoopStateBuildRoots(
                 pRoots,
                 &nRoots,
                 Root,
-                "Internal HDD",
+                "内置硬盘",
                 FALSE
             );
         }
@@ -1571,12 +2990,12 @@ static Int32 _MainLoopStateBuildRoots(
             pRoots,
             &nRoots,
             Root,
-            "Internal HDD",
+            "内置硬盘",
             FALSE
         );
     }
 
-    if ((bAuto || eDevice == MAINLOOP_STATEDEVICE_USB) && bMassReady)
+    if (bAuto || eDevice == MAINLOOP_STATEDEVICE_USB)
     {
         _MainLoopStateAddRoot(pRoots, &nRoots, "mass0:", "mass0:", FALSE);
         _MainLoopStateAddRoot(pRoots, &nRoots, "mass1:", "mass1:", FALSE);
@@ -1679,14 +3098,27 @@ static void _MainLoopStateBuildBankPath(
     }
 
     nMaxName = PathGetMaxFileNameLength(Directory) - 4;
-    PathTruncFileName(SaveName, _RomName, nMaxName);
+    if (_MainLoopStateIsSwc())
+    {
+        Char SwcName[256];
+        if (!_MainLoopStateGetSwcBaseName(SwcName, sizeof(SwcName)))
+            snprintf(SwcName, sizeof(SwcName), "%s", "Super Wild Card");
+        PathTruncFileName(SaveName, SwcName, nMaxName);
+    }
+    else
+    {
+        PathTruncFileName(SaveName, _RomName, nMaxName);
+    }
     snprintf(
         pPath,
         nPathBytes,
         "%s/%s.%c%d%c",
         Directory,
         SaveName,
-        _pSystem == _pNes ? 'n' : 's',
+        _pSystem == _pNes ? 'n' :
+            (_pSystem == _pFds ? 'f' : /* AURORA_FCEUMM_FDS_V0_6_STATE */
+             (_pSystem == _pSega ? 'g' :
+              (_pSystem == _pSnes9x2010 ? 'x' : (_MainLoopStateIsSwc() ? 'w' : 's')))),
         iSlot + 1,
         iBank ? 'b' : 'a'
     );
@@ -1726,7 +3158,7 @@ static Int32 _MainLoopStateReadHeader(
          pHeader->nPayloadBytes == nExpectedPayloadBytes) ||
         (pHeader->Reserved[0] == MAINLOOP_STATE_PAYLOAD_DEFLATE &&
          pHeader->nPayloadBytes > 0 &&
-         pHeader->nPayloadBytes <= sizeof(_MainLoop_StateCompressed));
+         pHeader->nPayloadBytes <= _MainLoopStateCompressedLimit(nExpectedPayloadBytes));
 
     if (memcmp(pHeader->Magic, _MainLoop_StateMagic, sizeof(pHeader->Magic)) ||
         pHeader->uVersion != MAINLOOP_STATE_FORMAT_VERSION ||
@@ -1760,6 +3192,10 @@ static Bool _MainLoopStateReadPayload(
     Uint8 *pStateData = _MainLoopStateGetPayloadData();
     Uint32 nStateBytes = _MainLoopStateGetPayloadBytes();
 
+    /* AURORA_PICODRIVE_STAGE2_STATE_DATA_GUARD */
+    if (!pStateData || !nStateBytes)
+        return FALSE;
+
     pFile = fopen(pPath, "rb");
     if (!pFile)
     {
@@ -1781,24 +3217,31 @@ static Bool _MainLoopStateReadPayload(
     }
     else if (Header.Reserved[0] == MAINLOOP_STATE_PAYLOAD_DEFLATE)
     {
+        /* AURORA_PICODRIVE_STAGE2_READ_COMPRESSED */
         mz_ulong nDecodedBytes = nStateBytes;
+        Uint32 nCompressedCapacity = 0;
+        Uint8 *pCompressed = _MainLoopStateGetCompressedBuffer(
+            Header.nPayloadBytes, &nCompressedCapacity);
 
-        nRead = fread(
-            _MainLoop_StateCompressed,
-            1,
-            Header.nPayloadBytes,
-            pFile
-        );
-        if (nRead == Header.nPayloadBytes &&
-            mz_uncompress(
-                pStateData,
-                &nDecodedBytes,
-                _MainLoop_StateCompressed,
-                Header.nPayloadBytes
-            ) == MZ_OK &&
-            nDecodedBytes == nStateBytes)
+        if (pCompressed && Header.nPayloadBytes <= nCompressedCapacity)
         {
-            bDecoded = TRUE;
+            nRead = fread(
+                pCompressed,
+                1,
+                Header.nPayloadBytes,
+                pFile
+            );
+            if (nRead == Header.nPayloadBytes &&
+                mz_uncompress(
+                    pStateData,
+                    &nDecodedBytes,
+                    pCompressed,
+                    Header.nPayloadBytes
+                ) == MZ_OK &&
+                nDecodedBytes == nStateBytes)
+            {
+                bDecoded = TRUE;
+            }
         }
     }
 
@@ -1948,6 +3391,7 @@ static void _MainLoopStateSortCandidates(Int32 nCandidates)
 
 Bool _MainLoopLoadState()
 {
+    MainLoopSegaStateScratchGuard SegaScratchGuard;
     Char Reason[192];
     Uint32 uRomCRC;
     Uint32 nRomBytes;
@@ -1965,18 +3409,9 @@ Bool _MainLoopLoadState()
         return FALSE;
     }
 
-    if (_MainLoop_StateDevice == MAINLOOP_STATEDEVICE_USB &&
-        !UsbBdmIsLoaded() && !Mx4sioIsLoaded() &&
-        UsbBdmLoadEmbeddedIrx() < 0)
-    {
-        _MainLoopStateSetMessage("USB driver failed (%d).",
-                                 UsbBdmGetLastError());
-        return FALSE;
-    }
-
     if (!_MainLoopStateGetRomIdentity(&uRomCRC, &nRomBytes, &uRomFlags))
     {
-        _MainLoopStateSetMessage("Cannot identify the loaded ROM.");
+        _MainLoopStateSetMessage("无法识别已加载的ROM。");
         return FALSE;
     }
 
@@ -2003,9 +3438,49 @@ Bool _MainLoopLoadState()
         Bool bRestoreOK = FALSE;
         if (bPayloadOK)
         {
-            bRestoreOK = _pSystem == _pNes
-                ? _pNes->RestoreState(&_NesState)
-                : _pSnes->RestoreState(&_SnesState);
+            /* AURORA_PICODRIVE_STAGE2_STATE_RESTORE */
+            if (_pSystem == _pNes)
+                bRestoreOK = _pNes->RestoreState(&_NesState);
+            else if (_pSystem == _pFds)
+            {
+                /* AURORA_FCEUMM_FDS_V0_6_STATE */
+                Uint8 *pFdsStateData = _MainLoopStateGetPayloadData();
+                Uint32 nFdsStateBytes = _MainLoopStateGetPayloadBytes();
+                bRestoreOK = pFdsStateData && nFdsStateBytes &&
+                    _pFds->RestoreStateChecked(pFdsStateData, (Int32)nFdsStateBytes);
+            }
+            else if (_pSystem == _pSega)
+            {
+                Uint8 *pSegaStateData = _MainLoopStateGetPayloadData();
+                Uint32 nSegaStateBytes = _MainLoopStateGetPayloadBytes();
+                bRestoreOK = pSegaStateData && nSegaStateBytes &&
+                    _pSega->RestoreStateChecked(pSegaStateData, (Int32)nSegaStateBytes);
+            }
+            else if (_pSystem == _pPce)
+            {
+                Uint8 *pPceStateData = _MainLoopStateGetPayloadData();
+                Uint32 nPceStateBytes = _MainLoopStateGetPayloadBytes();
+                bRestoreOK = pPceStateData && nPceStateBytes &&
+                    _pPce->RestoreStateChecked(pPceStateData, (Int32)nPceStateBytes);
+            }
+            else if (_pSystem == _pSnes9x2010)
+            {
+                Uint8 *pS9xStateData = _MainLoopStateGetPayloadData();
+                Uint32 nS9xStateBytes = _MainLoopStateGetPayloadBytes();
+                bRestoreOK = pS9xStateData && nS9xStateBytes &&
+                    _pSnes9x2010->RestoreStateChecked(
+                        pS9xStateData, (Int32)nS9xStateBytes);
+            }
+            else if (_MainLoopStateIsSwc())
+            {
+                Uint8 *pSwcStateData = _MainLoopStateGetPayloadData();
+                Uint32 nSwcStateBytes = _MainLoopStateGetPayloadBytes();
+                bRestoreOK = pSwcStateData && nSwcStateBytes &&
+                    _pSnes->RestoreStateChecked(
+                        pSwcStateData, (Int32)nSwcStateBytes);
+            }
+            else
+                bRestoreOK = _pSnes->RestoreState(&_SnesState);
         }
 
         if (bRestoreOK)
@@ -2034,7 +3509,7 @@ Bool _MainLoopLoadState()
 #endif
 
             _MainLoopStateSetMessage(
-                "Loaded slot %d from %s.",
+                "已读取存档位 %d（来自%s）。",
                 _MainLoop_StateSlot + 1,
                 pCandidate->DeviceName
             );
@@ -2049,21 +3524,21 @@ Bool _MainLoopLoadState()
     if (bCorrupt)
     {
         _MainLoopStateSetMessage(
-            "Slot %d is incomplete or corrupt.",
+            "存档位 %d 不完整或已损坏。",
             _MainLoop_StateSlot + 1
         );
     }
     else if (bWrongRom)
     {
         _MainLoopStateSetMessage(
-            "Slot %d belongs to another ROM.",
+            "存档位 %d 属于其他ROM。",
             _MainLoop_StateSlot + 1
         );
     }
     else
     {
         _MainLoopStateSetMessage(
-            "No state found in slot %d.",
+            "存档位 %d 中没有存档。",
             _MainLoop_StateSlot + 1
         );
     }
@@ -2074,6 +3549,7 @@ Bool _MainLoopLoadState()
 
 Bool _MainLoopSaveState()
 {
+    MainLoopSegaStateScratchGuard SegaScratchGuard;
     Char Reason[192];
     Uint32 uRomCRC;
     Uint32 nRomBytes;
@@ -2104,18 +3580,9 @@ Bool _MainLoopSaveState()
         return FALSE;
     }
 
-    if (_MainLoop_StateDevice == MAINLOOP_STATEDEVICE_USB &&
-        !UsbBdmIsLoaded() && !Mx4sioIsLoaded() &&
-        UsbBdmLoadEmbeddedIrx() < 0)
-    {
-        _MainLoopStateSetMessage("USB driver failed (%d).",
-                                 UsbBdmGetLastError());
-        return FALSE;
-    }
-
     if (!_MainLoopStateGetRomIdentity(&uRomCRC, &nRomBytes, &uRomFlags))
     {
-        _MainLoopStateSetMessage("Cannot identify the loaded ROM.");
+        _MainLoopStateSetMessage("无法识别已加载的ROM。");
         return FALSE;
     }
 
@@ -2155,12 +3622,67 @@ Bool _MainLoopSaveState()
        raw banks still load, and Reserved[0] advertises compressed banks. */
     pStateData = _MainLoopStateGetPayloadData();
     nStateBytes = _MainLoopStateGetPayloadBytes();
+    if (!pStateData || !nStateBytes)
+    {
+        _MainLoopStateSetMessage(
+            "无法分配核心状态缓冲区（%u字节）。",
+            (unsigned)nStateBytes);
+        return FALSE;
+    }
     if (_pSystem == _pNes)
     {
         _pNes->SaveState(&_NesState);
-        if (_NesState.uMagic != NES_STATE_MAGIC)
+        /* SNESTICLE_NES_CORE_STATE_MAGIC
+         * Do not hard-code InfoNES's NSST payload magic here. Every NesSystem
+         * implementation owns and validates its inner state format. Both the
+         * InfoNES and QuickNES wrappers memset the envelope to zero first and
+         * write a non-zero magic only after a complete snapshot succeeds. */
+        if (_NesState.uMagic == 0)
         {
-            _MainLoopStateSetMessage("Could not snapshot the NES mapper state.");
+            _MainLoopStateSetMessage("无法生成NES核心状态快照。");
+            return FALSE;
+        }
+    }
+    else if (_pSystem == _pFds)
+    {
+        /* AURORA_FCEUMM_FDS_V0_6_STATE */
+        if (!_pFds->SaveStateChecked(pStateData, (Int32)nStateBytes))
+        {
+            _MainLoopStateSetMessage("无法生成FCEUmm FDS状态快照。");
+            return FALSE;
+        }
+    }
+    else if (_pSystem == _pSega)
+    {
+        /* AURORA_PICODRIVE_STAGE2_STATE_SAVE */
+        if (!_pSega->SaveStateChecked(pStateData, (Int32)nStateBytes))
+        {
+            _MainLoopStateSetMessage("无法生成PicoDrive状态快照。");
+            return FALSE;
+        }
+    }
+    else if (_pSystem == _pPce)
+    {
+        if (!_pPce->SaveStateChecked(pStateData, (Int32)nStateBytes))
+        {
+            _MainLoopStateSetMessage("无法生成Beetle PCE Fast状态快照。");
+            return FALSE;
+        }
+    }
+    else if (_pSystem == _pSnes9x2010)
+    {
+        if (!_pSnes9x2010->SaveStateChecked(pStateData, (Int32)nStateBytes))
+        {
+            _MainLoopStateSetMessage("无法生成Snes9x 2010状态快照。");
+            return FALSE;
+        }
+    }
+    else if (_MainLoopStateIsSwc())
+    {
+        if (!_pSnes->SaveStateChecked(pStateData, (Int32)nStateBytes))
+        {
+            _MainLoopStateSetMessage(
+                "无法生成Super Wild Card状态快照。");
             return FALSE;
         }
     }
@@ -2177,18 +3699,27 @@ Bool _MainLoopSaveState()
     pPayload = pStateData;
     nPayloadBytes = nStateBytes;
     ePayloadEncoding = MAINLOOP_STATE_PAYLOAD_RAW;
-    nCompressedBytes = sizeof(_MainLoop_StateCompressed);
-    if (mz_compress2(
-            _MainLoop_StateCompressed,
-            &nCompressedBytes,
-            pStateData,
-            nStateBytes,
-            MZ_BEST_SPEED) == MZ_OK &&
-        nCompressedBytes < nStateBytes)
     {
-        pPayload = _MainLoop_StateCompressed;
-        nPayloadBytes = (Uint32)nCompressedBytes;
-        ePayloadEncoding = MAINLOOP_STATE_PAYLOAD_DEFLATE;
+        /* AURORA_PICODRIVE_STAGE2_SAVE_COMPRESSED */
+        Uint32 nCompressionCapacity = _MainLoopStateCompressedLimit(nStateBytes);
+        Uint32 nActualCapacity = 0;
+        Uint8 *pCompression = _MainLoopStateGetCompressedBuffer(
+            nCompressionCapacity, &nActualCapacity);
+        nCompressedBytes = nCompressionCapacity;
+        if (pCompression && nCompressionCapacity > 0 &&
+            nActualCapacity >= nCompressionCapacity &&
+            mz_compress2(
+                pCompression,
+                &nCompressedBytes,
+                pStateData,
+                nStateBytes,
+                MZ_BEST_SPEED) == MZ_OK &&
+            nCompressedBytes < nStateBytes)
+        {
+            pPayload = pCompression;
+            nPayloadBytes = (Uint32)nCompressedBytes;
+            ePayloadEncoding = MAINLOOP_STATE_PAYLOAD_DEFLATE;
+        }
     }
     uStoredCRC = (Uint32)mz_crc32(
         MZ_CRC32_INIT,
@@ -2300,7 +3831,7 @@ Bool _MainLoopSaveState()
         {
             _bStateSaved = TRUE;
             _MainLoopStateSetMessage(
-                "Saved slot %d to %s.",
+                "已保存到存档位 %d（%s）。",
                 _MainLoop_StateSlot + 1,
                 Roots[iRoot].DeviceName
             );
@@ -2315,14 +3846,14 @@ Bool _MainLoopSaveState()
     if (_MainLoop_StateUnformattedCard >= 0)
     {
         _MainLoopStateSetMessage(
-            "mc%d: is not formatted.",
+            "mc%d: 未格式化。",
             _MainLoop_StateUnformattedCard
         );
     }
     else
     {
         _MainLoopStateSetMessage(
-            "Could not save slot %d to %s.",
+            "无法保存到存档位 %d（%s）。",
             _MainLoop_StateSlot + 1,
             MainLoopStateGetDeviceName()
         );
@@ -2358,3 +3889,4 @@ void _MainLoopSaveHistory()
     printf("History written\n");
 }
 #endif
+

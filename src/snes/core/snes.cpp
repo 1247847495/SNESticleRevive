@@ -11,6 +11,52 @@
 #include "sndebug.h"
 #include "sndbglog.h"
 
+/* AURORA_SNES_NATIVE_32K_V1_20260822
+ *
+ * The SNESticle S-DSP mixer is fundamentally clocked around the SNES native
+ * 32 kHz sample domain. In particular, DSP-register write timestamps, envelope
+ * progression and echo/FIR behaviour were designed around that clock.
+ *
+ * Aurora briefly exposed lower synthesis rates directly to this mixer. That
+ * made the host buffer cheaper, but it also changed DSP timing semantics:
+ * the register-write queue still advanced in native 32 kHz units while the
+ * mixer produced fewer samples per frame.
+ *
+ * Keep SNES synthesis at its native rate and let AudMixBuffer perform the
+ * existing 32 -> 48 kHz host conversion. The setter remains as a compatibility
+ * API for video.cfg v35/older callers, but all requests normalize to native. */
+void SnesAudioSetRate(Uint32 hz)
+{
+    (void)hz;
+}
+
+Uint32 SnesAudioGetRate(void)
+{
+    return SNSPCDSP_SAMPLERATE;
+}
+
+#ifndef SNES_HK97_SPC_BOOT
+#define SNES_HK97_SPC_BOOT 0
+#endif
+
+/* AURORA_HK97_SPC_PREWARM_V9
+ * Set by snrom.cpp from the normalized ROM's exact CRC32. */
+extern Bool g_SnesCompatHongKong97SPCBoot;
+
+/* AURORA_HK97_SPC_PREWARM_V9_2
+ * mainloop_exec.cpp normally installs this only immediately before frame 1.
+ * V9.2 needs the real interpreter during Reset() for the CRC-gated prewarm. */
+extern "C" Int32 SNSPCExecute_C(SNSpcT *pCpu);
+
+#ifndef SNES_CRC_ZERO_INIT
+#define SNES_CRC_ZERO_INIT 0
+#endif
+
+/* AURORA_CRC_ZERO_INIT_CORE_V8
+ * Set by snrom.cpp from the normalized ROM's exact CRC32. */
+extern Bool g_SnesCompatZeroInit;
+
+
 // --- diagnostico de TIMING (ver sndbglog.h) ---
 #if SNDBG_LOG
 static Uint32 g_TmgFrameStart = 0;   // COP0 cycle no inicio do frame
@@ -43,8 +89,6 @@ static Uint32 g_TmgWinSumHDMATable = 0;
 static Int32  g_TmgIrqLineMin = 9999;
 static Int32  g_TmgIrqLineMax = -1;
 static Uint32 g_TmgIrqCount   = 0;   // total de H-IRQs na janela
-static Uint32 g_TmgIrqRearms  = 0;   // timer H/V reprogramado na linha ativa
-static Uint32 g_TmgIrqInstant = 0;   // novo compare ja ficou atras do feixe
 static Uint32 g_TmgFrameNo    = 0;
 // acumuladores por frame (externados, alimentados em snppurender8.cpp)
 Uint32 g_TmgCycM7  = 0;
@@ -74,10 +118,6 @@ Uint32 g_TmgCycHDMATable = 0;
 Uint32 g_DbgOAMWrites = 0;
 Uint32 g_DbgVRAMWrites = 0;
 Uint32 g_DbgCGRAMWrites = 0;
-Uint32 g_DbgCGRAMCommits = 0;
-Uint32 g_DbgCGRAMUnchanged = 0;
-Uint32 g_DbgVideoRenderedFrames = 0;
-Uint32 g_DbgVideoSkippedFrames = 0;
 Uint32 g_DbgObjEnabledLines = 0;
 Uint32 g_DbgObjOamRefs = 0;
 Uint32 g_DbgObjTiles = 0;
@@ -124,8 +164,6 @@ Uint32 g_DbgHDMATransferChannels = 0;
 Uint32 g_DbgBGActiveLayers = 0;
 Uint32 g_DbgBGMapReloads = 0;
 Uint32 g_DbgBGChrRows = 0;
-Uint32 g_DbgBGChrBlankRows = 0;
-Uint32 g_DbgBGChrRepeatRows = 0;
 Bool   g_DbgCaptureActive = FALSE;
 Uint32 g_DbgCaptureFrameNo = 0;
 // contagem de acessos ao DSP por janela (diagnostico de carga)
@@ -315,6 +353,20 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 		pSnes->SyncSPC();
 		return pSnes->m_SpcIO.m_Regs.apu_r[uAddr & 3];
 	}
+
+	/* AURORA_MEGA_V2_PPU_READ_MDR
+	 * PPU1 write-only register reads expose the chip's MDR. */
+	switch (uAddr)
+	{
+	case 0x2104: case 0x2105: case 0x2106: case 0x2108:
+	case 0x2109: case 0x210A: case 0x2114: case 0x2115:
+	case 0x2116: case 0x2118: case 0x2119: case 0x211A:
+	case 0x2124: case 0x2125: case 0x2126: case 0x2128:
+	case 0x2129: case 0x212A:
+		return pSnes->m_PPU.GetPPU1MDR();
+	default:
+		break;
+	}
 /*	if (uAddr < 0x2140)
 	{
 		// ppu read
@@ -324,63 +376,114 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	{
 
 	case 0x2137: // slhv
-		//SnesDebug("readppu_slhv\n");
-		pPPURegs->ophct.Reg.w = (SNCPUGetCounter(&pSnes->m_Cpu, SNCPU_COUNTER_LINE) + 14) >> 2;
-		pPPURegs->opvct.Reg.w = pSnes->m_uLine & 0x1FF;
-		//pPPURegs->opvct.Reg.w |= (pPPURegs->opvct.Reg.w << 8) & 0xFE00;
-		//pPPURegs->opvct.Reg.w = 0xE1;
-		return 0;
+		/* AURORA_ACCURACY_HV_IO_LATCH_V1
+		 * Software latching through $2137 is enabled by WRIO bit 7. */
+		if (pSnes->m_IO.m_Regs.wrio & 0x80)
+		{
+			pPPURegs->ophct.Reg.w = (SNCPUGetCounter(&pSnes->m_Cpu, SNCPU_COUNTER_LINE) + 14) >> 2;
+			pPPURegs->opvct.Reg.w = pSnes->m_uLine & 0x1FF;
+			pPPURegs->stat78 |= 0x40;
+		}
+		/* $2137 itself returns the S-CPU MDR; it does not drive a
+		   fresh PPU value onto the bus. */
+		return pCpu->uMDR;
 
-	case 0x2138: // read oam
-		#if SNPPU_WRITEQUEUE
-		pSnes->SyncPPU();
-		#endif
-        return pSnes->m_PPU.ReadOAMDATA();
+	case 0x2138: // OAMDATAREAD (PPU1 MDR)
+		{
+			#if SNPPU_WRITEQUEUE
+			pSnes->SyncPPU();
+			#endif
+			Uint8 uData = pSnes->m_PPU.ReadOAMDATA();
+			pSnes->m_PPU.SetPPU1MDR(uData);
+			return uData;
+		}
 
-	case 0x213c: // ophct
-		return pPPURegs->ophct.Read8();
+	case 0x213c: // OPHCT (PPU2 MDR; high read only replaces bit 0)
+		{
+			Bool bHigh = pPPURegs->ophct.bFlip;
+			Uint8 uData = pPPURegs->ophct.Read8();
+			if (bHigh)
+				uData = (Uint8)((pSnes->m_PPU.GetPPU2MDR() & 0xFE) | (uData & 1));
+			pSnes->m_PPU.SetPPU2MDR(uData);
+			return uData;
+		}
 
-	case 0x213d: // opvct
-		return pPPURegs->opvct.Read8();
+	case 0x213d: // OPVCT (PPU2 MDR; high read only replaces bit 0)
+		{
+			Bool bHigh = pPPURegs->opvct.bFlip;
+			Uint8 uData = pPPURegs->opvct.Read8();
+			if (bHigh)
+				uData = (Uint8)((pSnes->m_PPU.GetPPU2MDR() & 0xFE) | (uData & 1));
+			pSnes->m_PPU.SetPPU2MDR(uData);
+			return uData;
+		}
 
-	case 0x213e: // stat77
-		return pPPURegs->stat77;
+	case 0x213e: // STAT77: bit 4 comes from PPU1 MDR
+		{
+			Uint8 uData = (Uint8)((pSnes->m_PPU.GetPPU1MDR() & 0x10) |
+			                           (pPPURegs->stat77 & 0xCF));
+			pSnes->m_PPU.SetPPU1MDR(uData);
+			return uData;
+		}
 
-	case 0x213f: // stat78
-		pPPURegs->ophct.Reset();
-		pPPURegs->opvct.Reset();
-		return pPPURegs->stat78; // NTSC/PAL bit 4
-	case 0x2134: //mpyl
-		#if SNPPU_WRITEQUEUE
-		pSnes->SyncPPU();
-		#endif
-		return pPPURegs->mpyl;
-	case 0x2135: //mpym
-		#if SNPPU_WRITEQUEUE
-		pSnes->SyncPPU();
-		#endif
-		return pPPURegs->mpym;
-	case 0x2136: //mpyh
-		#if SNPPU_WRITEQUEUE
-		pSnes->SyncPPU();
-		#endif
-		return pPPURegs->mpyh;
-	case 0x2139:
-		#if SNPPU_WRITEQUEUE
-		pSnes->SyncPPU();
-		#endif
-		return pSnes->m_PPU.ReadVMDATAL();
-	case 0x213a:	// vmdatah (video port data hi)
-		#if SNPPU_WRITEQUEUE
-		pSnes->SyncPPU();
-		#endif
-		return pSnes->m_PPU.ReadVMDATAH();
+	case 0x213f: // STAT78: bit 5 comes from PPU2 MDR
+		{
+			Uint8 uData = pPPURegs->stat78;
+			pPPURegs->ophct.Reset();
+			pPPURegs->opvct.Reset();
+			if (!(pSnes->m_IO.m_Regs.wrio & 0x80))
+				uData |= 0x40;
+			else
+				pPPURegs->stat78 &= (Uint8)~0x40;
+			uData = (Uint8)((uData & 0xDF) | (pSnes->m_PPU.GetPPU2MDR() & 0x20));
+			pSnes->m_PPU.SetPPU2MDR(uData);
+			return uData;
+		}
+	case 0x2134: // MPYL (PPU1 MDR)
+	case 0x2135: // MPYM
+	case 0x2136: // MPYH
+		{
+			#if SNPPU_WRITEQUEUE
+			pSnes->SyncPPU();
+			#endif
+			Uint8 uData = (uAddr == 0x2134) ? pPPURegs->mpyl :
+			              (uAddr == 0x2135) ? pPPURegs->mpym : pPPURegs->mpyh;
+			pSnes->m_PPU.SetPPU1MDR(uData);
+			return uData;
+		}
 
-	case 0x213b:
-		#if SNPPU_WRITEQUEUE
-		pSnes->SyncPPU();
-		#endif
-		return pSnes->m_PPU.ReadCGDATA();
+	case 0x2139: // VMDATALREAD (PPU1 MDR)
+		{
+			#if SNPPU_WRITEQUEUE
+			pSnes->SyncPPU();
+			#endif
+			Uint8 uData = pSnes->m_PPU.ReadVMDATAL();
+			pSnes->m_PPU.SetPPU1MDR(uData);
+			return uData;
+		}
+
+	case 0x213a: // VMDATAHREAD (PPU1 MDR)
+		{
+			#if SNPPU_WRITEQUEUE
+			pSnes->SyncPPU();
+			#endif
+			Uint8 uData = pSnes->m_PPU.ReadVMDATAH();
+			pSnes->m_PPU.SetPPU1MDR(uData);
+			return uData;
+		}
+
+	case 0x213b: // CGDATAREAD (PPU2 MDR)
+		{
+			#if SNPPU_WRITEQUEUE
+			pSnes->SyncPPU();
+			#endif
+			Bool bHigh = (pPPURegs->cgadd.w & 1) ? TRUE : FALSE;
+			Uint8 uData = pSnes->m_PPU.ReadCGDATA();
+			if (bHigh)
+				uData = (Uint8)((pSnes->m_PPU.GetPPU2MDR() & 0x80) | (uData & 0x7F));
+			pSnes->m_PPU.SetPPU2MDR(uData);
+			return uData;
+		}
 
 	case 0x2180:	// WMDATA
 		{
@@ -578,28 +681,32 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read4000(SNCpuT *pCpu, Uint32 uAddr)
             return uData;
         }
 
-    case 0x4211:	// TIMEUP 
+    case 0x4211:	// TIMEUP
         {
             Uint8 uData = pIO->m_Regs.timeup;
             pIO->m_Regs.timeup &= ~0x80;
             SNCPUSignalIRQ(pCpu, 0);
+
+            /* AURORA_SPEEDY_MDR_4211_V1
+               TIMEUP drives bit 7; bits 0-6 are S-CPU MDR/open bus.
+               This is the behavior used by the classic Speedy Gonzales case. */
+            uData = (Uint8)((uData & 0x80) | (pCpu->uMDR & 0x7F));
+            pCpu->uMDR = uData;
             return uData;
         }
     case 0x4212:	// HVBJOY
-        {
-            /* Aero the Acro-Bat 2 polls VBlank around the frame wrap.
-               Line 0 is not part of VBlank even though the PPU does not draw
-               it.  Derive bit 7 from the live vertical counter so a stale
-               latched status (for example after restoring state) cannot keep
-               the game waiting forever. */
-            Uint8 uData = pIO->m_Regs.hvbjoy & (Uint8)~0x80;
-            if (SNES_LINE_IN_VBLANK(pSnes->m_uLine))
-                uData |= 0x80;
-            return uData;
-        }
-
+    {
+        /* AURORA_FCEUMM_FDS_V8_1_COMPAT_REVIEW_20260827
+         * Adapted from SNESticleRevive's general line-zero
+         * accuracy fix; no title-specific IRQ workaround.
+         * Aurora's current active-line loop is 0..224. */
+        Uint8 uData = pIO->m_Regs.hvbjoy & (Uint8)~0x80;
+        if (pSnes->m_uLine >= 225)
+            uData |= 0x80;
+        return uData;
+    }
     case 0x4213:	// RDIO
-        return 0;
+        return pIO->m_Regs.wrio;
 
 	case 0x4214:	// RDDIVL
 		return pIO->m_Regs.rddiv.b.l;
@@ -688,7 +795,9 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 
         case 0x4200:	// nmitimen
         {
-			Uint8 uOldNmitimen = pIO->m_Regs.nmitimen;
+#if SNES_HVIRQ_RESCHEDULE
+            Uint8 uOldNmitimen = pIO->m_Regs.nmitimen;
+#endif
             pIO->m_Regs.nmitimen = uData;
 
             // unconfirmed:
@@ -718,15 +827,25 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 
             // set new nmi signal
             SNCPUSignalNMI(pCpu, pIO->m_Regs.rdnmi & pIO->m_Regs.nmitimen & 0x80);
-			if ((uOldNmitimen ^ uData) & 0x30)
-				pSnes->RescheduleLineIRQ(TRUE);
+#if SNES_HVIRQ_RESCHEDULE
+            if ((uOldNmitimen ^ uData) & 0x30)
+                pSnes->RescheduleLineIRQ(TRUE);
+#endif
             break;
-		}
+        }
 
         case 0x4201:	// wrio (programmable i/o port)
-            // confirmed:
-            // setting this to a value will cause the h/v latching to be controlled
-            // by external latching (v-count seemed to stick at E1)
+            /* Falling edge on PIO bit 7 is the software-controlled
+               external H/V latch trigger used by the real S-CPU. */
+            if ((pIO->m_Regs.wrio & 0x80) && !(uData & 0x80))
+            {
+                SnesPPURegsT *pPPURegs =
+                    (SnesPPURegsT *)pSnes->m_PPU.GetRegs();
+                pPPURegs->ophct.Reg.w =
+                    (SNCPUGetCounter(&pSnes->m_Cpu, SNCPU_COUNTER_LINE) + 14) >> 2;
+                pPPURegs->opvct.Reg.w = pSnes->m_uLine & 0x1FF;
+                pPPURegs->stat78 |= 0x40;
+            }
             pIO->m_Regs.wrio = uData;
             break;
 
@@ -762,19 +881,27 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 
         case 0x4207:	// htmel (video horizontal IRQ beam position)
             pIO->m_Regs.htime.b.l = uData;
-			pSnes->RescheduleLineIRQ(FALSE);
+#if SNES_HVIRQ_RESCHEDULE
+            pSnes->RescheduleLineIRQ(FALSE);
+#endif
             break;
         case 0x4208:	// htmeh (video horizontal IRQ beam position)
             pIO->m_Regs.htime.b.h = uData & 1;
-			pSnes->RescheduleLineIRQ(FALSE);
+#if SNES_HVIRQ_RESCHEDULE
+            pSnes->RescheduleLineIRQ(FALSE);
+#endif
             break;
         case 0x4209:	// vtmel (video vertical IRQ beam position)
             pIO->m_Regs.vtime.b.l = uData;
-			pSnes->RescheduleLineIRQ(FALSE);
+#if SNES_HVIRQ_RESCHEDULE
+            pSnes->RescheduleLineIRQ(FALSE);
+#endif
             break;
         case 0x420A:	// vtmeh (video vertical IRQ beam position)
             pIO->m_Regs.vtime.b.h = uData & 1;
-			pSnes->RescheduleLineIRQ(FALSE);
+#if SNES_HVIRQ_RESCHEDULE
+            pSnes->RescheduleLineIRQ(FALSE);
+#endif
             break;
 
 		case 0x420B:	// mdmaen (DMA enable register)
@@ -1007,13 +1134,14 @@ SnesSystem::SnesSystem()
 	m_Cpu.pUserData = (void *)this;
 
 	m_uSramSize = 0;
-	m_bDynamicHVIRQ = FALSE;
+#if SNES_HVIRQ_RESCHEDULE
 	m_bLineIRQActive = FALSE;
 	m_bLineIRQReschedule = FALSE;
 	m_bLineIRQFired = FALSE;
 	m_bLineIRQInstant = FALSE;
 	m_nLineIRQCycle = -1;
 	m_nLineIRQClock = 0;
+#endif
 
 	// setup spc
 	SNSPCNew(&m_Spc);
@@ -1035,6 +1163,7 @@ SnesSystem::SnesSystem()
 	m_DMAC.SetSDD1(&m_SDD1);
 
 	m_bSDD1 = FALSE;
+	m_bSuperWildCard = FALSE; /* AURORA_SWC_FLOPPY_V1_20260831 */
 
 	// setup ppu
 	m_PPURender.SetPPU(&m_PPU);
@@ -1057,7 +1186,18 @@ SnesSystem::~SnesSystem()
 
 void SnesSystem::Reset()
 {
-	SetSlowRom();
+	/* AURORA_V7_FRONT_COPIER_MEDIA_CART_RESET_20260831
+	 * SNES RESET is a warm console reset, not copier power-on. Preserve the
+	 * Front copier's current System Mode (1=cart, 2/3=DRAM) and merely rebuild
+	 * the map before the S-CPU takes the current reset vector. */
+	if (m_bSuperWildCard)
+	{
+		MapSuperWildCard();
+	}
+	else
+	{
+		SetSlowRom();
+	}
 
 	m_PPU.Reset();
 	m_DMAC.Reset();
@@ -1092,28 +1232,124 @@ void SnesSystem::Reset()
 	memset(_CPUHackMem, 0, sizeof(_CPUHackMem));
 #endif
 
-	memset(m_Ram, 0, sizeof(m_Ram));
-	memset(m_SRam, 0, sizeof(m_SRam));
-
+	/* AURORA_MEGA_V5_RESET_PRESERVE_RAM
+	 * RESET is warm: preserve WRAM/SRAM. Cold power is SetSnesRom(). */
 	// reset cpu
 	SNCPUReset(&m_Cpu, true);
 	SNSPCReset(&m_Spc, true);
 
+#if SNES_HK97_SPC_BOOT
+	/* AURORA_HK97_SPC_PREWARM_V9
+	 *
+	 * Hong Kong '97 forces $2100=$80 (black screen) and then performs
+	 * a 16-bit CMP $2140 until the SPC700 IPL publishes $BBAA.
+	 *
+	 * Normally Aurora advances the SPC lazily when the S-CPU touches APUIO.
+	 * For these exact Hong Kong '97 CRCs only, let the REAL embedded IPL run
+	 * first until it naturally writes AA to $F4 and BB to $F5.
+	 *
+	 * We do NOT synthesize AA/BB. If the SPC core cannot reach the handshake
+	 * within the bounded budget, restore the ordinary hard-reset state.
+	 *
+	 * On success, retain SPC registers/APURAM/ports but zero only scheduler
+	 * counters, so CPU and SPC both begin emulated time at t=0 while the IPL
+	 * remains parked in its normal wait-for-$CC loop.
+	 */
+	if (g_SnesCompatHongKong97SPCBoot)
+	{
+		const Int32 kHK97ChunkClocks = 4096;
+		const Int32 kHK97MaxClocks   = 131072;
+		Int32 nHK97Clocks = 0;
+
+		while (nHK97Clocks < kHK97MaxClocks &&
+		       !(m_SpcIO.m_Regs.apu_r[0] == 0xAA &&
+		         m_SpcIO.m_Regs.apu_r[1] == 0xBB))
+		{
+			/* V9.2: Reset() runs before _ExecuteSnes() installs
+			 * SNSPCExecute_C as the global SPC executor. Calling the wrapper here
+			 * therefore used the no-op default executor in V9/V9.1.
+			 *
+			 * Reproduce SNSPCExecute()'s accounting locally, but invoke the real
+			 * SPC700 interpreter directly. This keeps the experiment CRC-isolated
+			 * and does not change the global executor for other games. */
+			m_Spc.Cycles += kHK97ChunkClocks;
+			m_Spc.Counter[SNSPC_COUNTER_TOTAL] += kHK97ChunkClocks;
+			m_Spc.Counter[SNSPC_COUNTER_FRAME] += kHK97ChunkClocks;
+			SNSPCExecute_C(&m_Spc);
+			nHK97Clocks += kHK97ChunkClocks;
+		}
+
+		if (m_SpcIO.m_Regs.apu_r[0] == 0xAA &&
+		    m_SpcIO.m_Regs.apu_r[1] == 0xBB)
+		{
+			/* Preserve the naturally reached IPL state and handshake,
+			   but do not start the APU ahead of the S-CPU scheduler. */
+			SNSPCResetCounters(&m_Spc);
+		}
+		else
+		{
+			/* Fail closed: exact legacy hard-reset state, no forged ports. */
+			m_SpcIO.Reset();
+			SNSPCReset(&m_Spc, true);
+		}
+	}
+#endif
+
 	m_uFrame=0;
 	m_uLine =0;
-	m_bLineIRQActive = FALSE;
-	m_bLineIRQReschedule = FALSE;
-	m_bLineIRQFired = FALSE;
-	m_bLineIRQInstant = FALSE;
-	m_nLineIRQCycle = -1;
-	m_nLineIRQClock = 0;
 }
 
 void SnesSystem::SoftReset()
 {
-	// reset cpu
-	SNCPUReset(&m_Cpu, false);
-	SNSPCReset(&m_Spc, false);
+    /*
+     * Soft reset:
+     * reset the console hardware state without clearing RAM, SRAM,
+     * VRAM, CGRAM or OAM.
+     */
+
+    /* AURORA_V7_FRONT_COPIER_MEDIA_CART_RESET_20260831: soft reset preserves active copier System Mode too. */
+    if (m_bSuperWildCard)
+        MapSuperWildCard();
+    else
+        SetSlowRom();
+
+    m_PPU.SoftReset();
+    m_DMAC.Reset();
+    m_IO.Reset();
+    m_SpcIO.Reset();
+    m_SpcDsp.Reset();
+    m_SpcDspMixer.Reset();
+    m_SpcDspSilentMixer.Reset();
+
+#ifdef SNES_DSP1
+    if (m_pDsp)
+    {
+        m_pDsp->Reset();
+    }
+#endif
+
+    m_OBC1.Reset();
+    m_CX4.Reset();
+    m_GSU.Reset();
+    m_SDD1.Reset();
+
+    /*
+     * Do not randomize or clear main RAM/SRAM here.
+     */
+SNCPUResetCounters(&m_Cpu);
+
+SNCPUReset(&m_Cpu, false);
+m_Cpu.Regs.rS.w = 0x01FF;
+m_Cpu.Regs.rDP = 0;
+m_Cpu.Regs.rDB = 0;
+m_Cpu.Regs.rX.b.h = 0;
+m_Cpu.Regs.rY.b.h = 0;
+
+/* Restart SPC from IPL ROM while preserving APURAM. */
+SNSPCSoftReset(&m_Spc);
+
+m_uFrame = 0;
+m_uLine = 0;
 }
 
 
@@ -1124,6 +1360,12 @@ void SnesSystem::SetRom(class Emu::Rom *pRom)
 
 void SnesSystem::SetSnesRom(SnesRom *pRom)
 {
+	/* AURORA_SWC_FLOPPY_V1_20260831 */
+	if (m_bSuperWildCard)
+	{
+		m_SWC.Shutdown();
+		m_bSuperWildCard = FALSE;
+	}
 	if (m_pRom)
 	{
 		// disconnect from current rom
@@ -1131,28 +1373,53 @@ void SnesSystem::SetSnesRom(SnesRom *pRom)
 	}
 #ifdef SNES_DSP1
 	m_pDsp = NULL;
-	m_DSP1.SetTargetYSubtract(FALSE);
+	/* AURORA_UPSTREAM_20260827_DSP1_OP28_REVISION_V1 */
 	m_DSP1.SetOriginalDistanceBug(FALSE);
 #endif 
-	m_bDynamicHVIRQ = FALSE;
 	// set rom
 	m_pRom = pRom;
 
 	if (m_pRom)
 	{
-		m_bDynamicHVIRQ =
-			(m_pRom->m_Flags & SNROM_FLAG_PILOTWINGS_DYNAMIC_HVIRQ)
-				? TRUE : FALSE;
-		#ifdef SNES_DSP1
-		m_DSP1.SetTargetYSubtract(
-			(m_pRom->m_Flags & SNROM_FLAG_DSP1_TARGET_Y_SUBTRACT)
-				? TRUE : FALSE);
+#ifdef SNES_DSP1
 		m_DSP1.SetOriginalDistanceBug(
-			(m_pRom->m_Flags & SNROM_FLAG_DSP1_ORIGINAL_OP28)
-				? TRUE : FALSE);
-		#endif
+			(m_pRom->m_Flags & SNROM_FLAG_DSP1_ORIGINAL_OP28) ? TRUE : FALSE);
+#endif
 		// setup memory mapping for this rom
 		MapMem(m_pRom->m_eMapping, m_pRom->m_Flags);
+
+		/* AURORA_CRC_ZERO_INIT_CORE_V8
+		 * A tiny exact-CRC compatibility group reproduces ReyFxck's original
+		 * cold boot (WRAM=00, SRAM backing=00). This happens before the normal
+		 * SRAM loader, so an existing .srm still replaces the initialized bytes.
+		 * Every other ROM keeps Aurora's randomized WRAM + 0xFF fresh SRAM. */
+#if SNES_CRC_ZERO_INIT
+		if (g_SnesCompatZeroInit)
+		{
+			memset(m_Ram, 0x00, sizeof(m_Ram));
+			memset(m_SRam, 0x00, sizeof(m_SRam));
+		}
+		else
+#endif
+		{
+			/* AURORA_MEGA_V5_COLD_BOOT_WRAM
+			 * Real power-on WRAM is undefined/random-looking. Randomise only when a
+			 * new cartridge is attached, never on RESET or save-state restore. */
+			Uint32 uAuroraSeed =
+				((Uint32)(unsigned long)m_pRom ^ (Uint32)rand() ^
+				 ((Uint32)rand() << 16) ^ 0xA5C31F27u);
+			if (!uAuroraSeed) uAuroraSeed = 0x6D2B79F5u;
+			for (Uint32 i = 0; i < (Uint32)sizeof(m_Ram); ++i)
+			{
+				uAuroraSeed ^= uAuroraSeed << 13;
+				uAuroraSeed ^= uAuroraSeed >> 17;
+				uAuroraSeed ^= uAuroraSeed << 5;
+				m_Ram[i] = (Uint8)uAuroraSeed;
+			}
+			/* Fresh nonvolatile backing starts erased; the SRAM loader may replace it. */
+			if (m_uSramSize)
+				memset(m_SRam, 0xFF, m_uSramSize);
+		}
 	} 
 	else
 	{
@@ -1168,6 +1435,125 @@ void SnesSystem::SetSnesRom(SnesRom *pRom)
 
 
 
+
+/* AURORA_SWC_FLOPPY_V1_20260831 */
+Bool SnesSystem::LoadSuperWildCard(const Char *pFirmwarePath,
+                                   const Char *pDiskPath)
+{
+    SetSnesRom(NULL);
+
+    if (!m_SWC.Load(pFirmwarePath, pDiskPath, SNSuperWildCard::MODEL_SWC))
+        return FALSE;
+
+    m_bSuperWildCard = TRUE;
+    m_bSDD1 = FALSE;
+    m_bSRTC = FALSE;
+    m_bSuperFX = FALSE;
+#if SNES_DSP1
+    m_pDsp = NULL;
+#endif
+
+    m_uSramSize = 0x8000;
+    memset(m_SRam, 0xFF, m_uSramSize);
+
+    MapSuperWildCard();
+    Reset();
+    return TRUE;
+}
+
+/* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831: classic common 16-Mbit Super Magicom MS-3201. */
+Bool SnesSystem::LoadSuperMagicom(const Char *pFirmwarePath,
+                                  const Char *pDiskPath)
+{
+    SetSnesRom(NULL);
+    if (!m_SWC.Load(pFirmwarePath,pDiskPath,SNSuperWildCard::MODEL_MAGICOM))
+        return FALSE;
+    m_bSuperWildCard=TRUE; /* shared Front-copier-active flag */
+    m_bSDD1=FALSE; m_bSRTC=FALSE; m_bSuperFX=FALSE;
+#if SNES_DSP1
+    m_pDsp=NULL;
+#endif
+    m_uSramSize=0x8000;
+    memset(m_SRam,0xFF,m_uSramSize);
+    MapSuperWildCard();
+    Reset();
+    return TRUE;
+}
+
+
+/* AURORA_SWC_FLOPPY_V5_20260831 */
+Bool SnesSystem::InsertSuperWildCardCartridge(SnesRom *pRom)
+{
+    Bool ok;
+
+    if (!m_bSuperWildCard || !pRom || !pRom->IsLoaded())
+        return FALSE;
+
+    if (pRom->m_eMapping != SNROM_MAPPING_LOROM &&
+        pRom->m_eMapping != SNROM_MAPPING_HIROM)
+        return FALSE;
+
+    /* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901
+     * The external cart owns separate Game Pak RAM. SNROM_FLAG_SAVERAM is
+     * battery-backed; plain SNROM_FLAG_RAM remains volatile. */
+    ok = m_SWC.SetExternalCartridge(
+        pRom->GetData(),
+        pRom->GetBytes(),
+        (Int32)pRom->m_eMapping,
+        pRom->GetSRAMBytes(),
+        (pRom->m_Flags & SNROM_FLAG_SAVERAM) ? TRUE : FALSE);
+    if (ok)
+    {
+        /* AURORA_SWC_V10_MENU_INDEX_CARTRESET_20260831
+         * Cartridge topology changed: restart SWC/SNES so the BIOS sees the
+         * newly attached cartridge from a clean mode-0 boot. Mounted floppy
+         * media is preserved by SNSuperWildCard::Reset(). */
+        /* AURORA_V7_FRONT_COPIER_MEDIA_CART_RESET_20260831: physical cartridge topology changed -> copier BIOS. */
+        m_SWC.Reset();
+        Reset();
+    }
+    return ok;
+}
+
+void SnesSystem::EjectSuperWildCardCartridge()
+{
+    if (m_bSuperWildCard && m_SWC.HasExternalCartridge())
+    {
+        m_SWC.ClearExternalCartridge();
+
+        /* AURORA_SWC_V10_MENU_INDEX_CARTRESET_20260831
+         * Cartridge removal resets the copier too. Disk insertion/swap is
+         * deliberately separate and remains hot-swappable. */
+        /* AURORA_V7_FRONT_COPIER_MEDIA_CART_RESET_20260831: physical cartridge removal -> copier BIOS. */
+        m_SWC.Reset();
+        Reset();
+    }
+}
+
+Bool SnesSystem::SwapSuperWildCardDisk(const Char *pDiskPath)
+{
+    if (!m_bSuperWildCard)
+        return FALSE;
+    return m_SWC.SwapDisk(pDiskPath);
+}
+
+void SnesSystem::ShutdownSuperWildCard()
+{
+    if (!m_bSuperWildCard)
+        return;
+    SetSnesRom(NULL);
+}
+
+#if SNES_HVIRQ_RESCHEDULE
+/* AURORA_HVIRQ_RESCHEDULE_V4
+ * Return the absolute master-clock position of the timer event on the
+ * current scanline.  -1 means that the current H/V enable + V-counter state
+ * does not arm an IRQ on this line.
+ *
+ * H-only: every line at HTIME.
+ * V-only: matching V line at the vertical IRQ trigger position.
+ * H+V:    matching V line at HTIME.
+ */
 Int32 SnesSystem::CalculateLineIRQCycle()
 {
 	const Bool bH = (m_IO.m_Regs.nmitimen & 0x10) ? TRUE : FALSE;
@@ -1177,8 +1563,7 @@ Int32 SnesSystem::CalculateLineIRQCycle()
 	{
 		if (m_uLine != m_IO.m_Regs.vtime.w)
 			return -1;
-		return bH ? SNES_HIRQ_CYCLES(m_IO.m_Regs.htime.w)
-		          : SNES_VIRQ_CYCLES;
+		return bH ? SNES_HIRQ_CYCLES(m_IO.m_Regs.htime.w) : SNES_VIRQ_CYCLES;
 	}
 
 	return bH ? SNES_HIRQ_CYCLES(m_IO.m_Regs.htime.w) : -1;
@@ -1187,22 +1572,25 @@ Int32 SnesSystem::CalculateLineIRQCycle()
 
 void SnesSystem::RescheduleLineIRQ(Bool bAllowImmediate)
 {
-	/* Pilotwings changes $4200/$4207-$420A after ExecuteLine() already
-	   calculated the timer event. Stop the CPU batch and give its unused
-	   clocks back so the new compare can take effect on this scanline. */
-	if (!m_bDynamicHVIRQ || !m_bLineIRQActive)
+	/* Register writes outside ExecuteLine() only affect the next line's normal
+	 * initial calculation.  While a line is live, re-arm from the new register
+	 * state and abort the current 65816 execution batch so ExecuteWithIRQ() can
+	 * return the unspent clocks to the horizontal scheduler and split at the
+	 * new event position.
+	 *
+	 * SNCPUAbort() is already the core's supported mechanism for leaving the
+	 * executing CPU batch (MDMA/NMI use the same facility); it preserves the
+	 * remaining cycle budget in m_Cpu.Cycles. */
+	if (!m_bLineIRQActive)
 		return;
 
 	m_nLineIRQCycle = CalculateLineIRQCycle();
 	m_bLineIRQFired = FALSE;
 	m_bLineIRQInstant = bAllowImmediate;
 	m_bLineIRQReschedule = TRUE;
-#if SNDBG_LOG
-	g_TmgIrqRearms++;
-#endif
 	SNCPUAbort(&m_Cpu);
 }
-
+#endif
 
 void SnesSystem::ExecuteCPU(Int32 nCycles)
 {
@@ -1324,12 +1712,6 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
             } else
             if (m_Cpu.uSignal & SNCPU_SIGNAL_IRQ)
             {
-				/* Opcode-based cores cannot observe a timer edge in the middle
-				   of an instruction.  A game-specific line-zero V-IRQ may leave
-				   a short pending window so the polling opcode(s) retire first. */
-				if (SNCPUExecuteIRQDelay(&m_Cpu))
-					continue;
-
                 // attempt irq
                 // irqs will always be attempted until signal has been cleared
                 SNCPUIRQ(&m_Cpu);
@@ -1347,8 +1729,10 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 
         // run CPU!
         SNCPUExecute(&m_Cpu);
-		if (m_bLineIRQActive && m_bLineIRQReschedule)
-			break;
+#if SNES_HVIRQ_RESCHEDULE
+        if (m_bLineIRQActive && m_bLineIRQReschedule)
+            break;
+#endif
     }
 }
 
@@ -1356,30 +1740,38 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 
 void SnesSystem::ExecuteWithIRQ(Int32 nCycles, Int32 &nIRQCycles)
 {
+#if SNES_HVIRQ_RESCHEDULE
 	if (m_bLineIRQActive)
 	{
+		/* Dynamic timer path.  Normally this still executes one large batch up
+		 * to the pending IRQ.  Extra scheduler work happens only when a game
+		 * actually rewrites $4200/$4207-$420A during the line.
+		 *
+		 * A timer write calls SNCPUAbort(), leaving the unexecuted part of the
+		 * current batch in m_Cpu.Cycles.  Undo that reservation from all CPU
+		 * counters before looping, so the replacement schedule does not double
+		 * count physical time. */
 		Int32 nRemaining = nCycles;
 
 		while (nRemaining > 0)
 		{
 			Int32 nNow = m_nLineIRQClock;
 
-			/* Toggling H/V IRQ mode after the compare point raises TIMEUP
-			   immediately. Merely rewriting HTIME/VTIME to a stale point does
-			   not manufacture a second IRQ on this scanline. */
+			/* A newly-programmed position may already be behind the beam.  This
+			 * is the immediate-IRQ case used by mature SNES schedulers when timer
+			 * registers are changed mid-line. */
 			if (!m_bLineIRQFired && m_nLineIRQCycle >= 0 &&
 				m_nLineIRQCycle <= nNow)
 			{
+				/* Current Snes9x only permits an instant IRQ when IRQ mode is
+				 * toggled. A plain HTIME/VTIME rewrite to a position already
+				 * behind the beam is stale for this scanline. */
 				m_bLineIRQFired = TRUE;
 				m_nLineIRQCycle = -1;
 				if (m_bLineIRQInstant)
 				{
 					m_IO.m_Regs.timeup |= 0x80;
-					SNCPUSetIRQDelay(&m_Cpu, 0);
 					SNCPUSignalIRQ(&m_Cpu, 1);
-#if SNDBG_LOG
-					g_TmgIrqInstant++;
-#endif
 				}
 				continue;
 			}
@@ -1402,14 +1794,19 @@ void SnesSystem::ExecuteWithIRQ(Int32 nCycles, Int32 &nIRQCycles)
 
 			if (m_bLineIRQReschedule)
 			{
-				/* SNCPUAbort returns the clocks that were reserved but not run.
-				   Remove them from both the live budget and every counter before
-				   rebuilding the timer split. */
+				/* SNCPUAbort restored the part of this just-added execution budget
+				 * that has not run yet.  Remove those clocks from Cycles AND every
+				 * scheduled counter.  Counter-Cycles (the observed beam position)
+				 * therefore stays unchanged. */
 				Int32 nUnspent = m_Cpu.Cycles;
 				if (nUnspent < 0)
 					nUnspent = 0;
 				if (nUnspent > nRun)
+				{
+					/* This should be impossible at an I/O trap; fail conservative by
+					 * limiting the rollback to clocks reserved by this batch. */
 					nUnspent = nRun;
+				}
 
 				if (nUnspent > 0)
 				{
@@ -1430,13 +1827,13 @@ void SnesSystem::ExecuteWithIRQ(Int32 nCycles, Int32 &nIRQCycles)
 			m_nLineIRQClock += nRun;
 			nRemaining -= nRun;
 
-			if (bReachIRQ && !m_bLineIRQFired &&
-				m_nLineIRQCycle >= 0)
+			if (bReachIRQ && !m_bLineIRQFired && m_nLineIRQCycle >= 0)
 			{
+				/* The old scheduler stopped here too; IRQ entry itself still waits
+				 * for the 65816 instruction boundary through SNCPUSignalIRQ(). */
 				m_bLineIRQFired = TRUE;
 				m_nLineIRQCycle = -1;
 				m_IO.m_Regs.timeup |= 0x80;
-				SNCPUSetIRQDelay(&m_Cpu, 0);
 				SNCPUSignalIRQ(&m_Cpu, 1);
 			}
 		}
@@ -1444,7 +1841,9 @@ void SnesSystem::ExecuteWithIRQ(Int32 nCycles, Int32 &nIRQCycles)
 		nIRQCycles -= nCycles;
 		return;
 	}
+#endif
 
+	/* Exact legacy scheduler, compiled unchanged for A/B fallback. */
     if (nIRQCycles >= 0 && nIRQCycles < nCycles)
     {
         // execute up to h-irq
@@ -1452,26 +1851,6 @@ void SnesSystem::ExecuteWithIRQ(Int32 nCycles, Int32 &nIRQCycles)
 
         // set irq flag 
         m_IO.m_Regs.timeup |= 0x80;
-
-		/* Aero the Acro-Bat 2 waits for $4212.VBlank to clear while its
-		   V-only timer targets line 0.  The real timer edge occurs inside an
-		   opcode; entering the handler before that polling opcode retires
-		   leaves the game in the black-screen loop after the intro.  Snes9x's
-		   opcode core uses the same two-opcode deferral for this title. */
-		const char *pTitle = m_pRom ? m_pRom->GetRomTitle() : NULL;
-		if (m_uLine == 0 &&
-			(m_IO.m_Regs.nmitimen & 0x30) == 0x20 &&
-			m_IO.m_Regs.vtime.w == 0 &&
-			pTitle &&
-			(strcmp(pTitle, "Aero the AcroBat 2") == 0 ||
-			 strcmp(pTitle, "AERO THE ACROBAT 2") == 0))
-		{
-			SNCPUSetIRQDelay(&m_Cpu, 2);
-		}
-		else
-		{
-			SNCPUSetIRQDelay(&m_Cpu, 0);
-		}
         SNCPUSignalIRQ(&m_Cpu, 1);
 
         // execute rest of way
@@ -1490,46 +1869,54 @@ void SnesSystem::ExecuteWithIRQ(Int32 nCycles, Int32 &nIRQCycles)
 
 void SnesSystem::ExecuteLine()
 {
+	/* AURORA_V7_HORIZONTAL_SCHEDULER
+	 * Keep the existing scanline-oriented renderer, but put the major
+	 * S-CPU bus events at their real horizontal positions instead of
+	 * treating H=1024 as both HBlank and HDMA.
+	 *
+	 * ExecuteWithIRQ() is deliberately used to account stolen intervals.
+	 * The bus owner first subtracts clocks from m_Cpu.Cycles; scheduling the
+	 * same number of physical clocks afterwards advances the counters while
+	 * the negative CPU budget prevents 65816 instructions from running.
+	 * If HDMA overruns H=1364, the remaining negative budget naturally
+	 * carries into the next line instead of lengthening the video line. */
 	SNCPUResetCounter(&m_Cpu, SNCPU_COUNTER_LINE);
 
-    // don't trigger IRQ by default
-    int nHIRQCycles = -1;
+	Int32 nHIRQCycles = -1;
+	Int32 nHClock = 0;
+	/* ares S-CPU revision 2: setup=12+phase, refresh=538-phase.
+	 * Counter[TOTAL] is scheduled physical time, so it remains meaningful
+	 * even when a DMA overrun is carried as a negative CPU budget. */
+	Int32 nDMAPhase = m_Cpu.Counter[SNCPU_COUNTER_TOTAL] & 7;
+	Int32 nHDMASetupCycle = SNES_HDMA_SETUP_BASE_CYCLE + nDMAPhase;
+	Int32 nDRAMRefreshCycle = SNES_DRAM_REFRESH_BASE_CYCLE - nDMAPhase;
 
-	// virq enabled?
+	// vertical + horizontal IRQ selection
 	if (m_IO.m_Regs.nmitimen & 0x20)
 	{
 		if (m_uLine == m_IO.m_Regs.vtime.w)
 		{
-			// hirq enabled?
 			if (m_IO.m_Regs.nmitimen & 0x10)
-			{
-				// calculate cycle time to perform h-irq
 				nHIRQCycles = SNES_HIRQ_CYCLES(m_IO.m_Regs.htime.w);
-
-			} else
-			{
-				// trigger at beginning of line
+			else
 				nHIRQCycles = SNES_VIRQ_CYCLES;
-			}
 		}
-	} else
-	// hirq enabled?
-	if (m_IO.m_Regs.nmitimen & 0x10)
+	}
+	else if (m_IO.m_Regs.nmitimen & 0x10)
 	{
-		// calculate cycle time to perform h-irq
 		nHIRQCycles = SNES_HIRQ_CYCLES(m_IO.m_Regs.htime.w);
 	}
 
-	m_bLineIRQActive = m_bDynamicHVIRQ;
+#if SNES_HVIRQ_RESCHEDULE
+	m_bLineIRQActive = TRUE;
 	m_bLineIRQReschedule = FALSE;
 	m_bLineIRQFired = FALSE;
 	m_bLineIRQInstant = TRUE;
 	m_nLineIRQCycle = nHIRQCycles;
 	m_nLineIRQClock = 0;
+#endif
 
 #if SNDBG_LOG
-	// rastreia a scanline em que um H-IRQ esta agendado (divisao de tela).
-	// Se min..max variam muito frame a frame, a divisao "treme".
 	if (nHIRQCycles >= 0)
 	{
 		Int32 ln = (Int32)m_uLine;
@@ -1541,51 +1928,96 @@ void SnesSystem::ExecuteLine()
 
 	PROF_ENTER("ExecLine");
 
-	SNCPUConsumeCycles(&m_Cpu, SNES_LINECYCLEDELAY);
+	/* These macros advance PHYSICAL line time.  They intentionally do not
+	 * force m_Cpu.Cycles to zero: a negative budget is an in-flight bus
+	 * stall from DMA/HDMA and is paid by later physical slices. */
+#define AURORA_V7_RUN_TO(_target) do { \
+		Int32 _auroraTarget = (Int32)(_target); \
+		if (nHClock < _auroraTarget) { \
+			Int32 _auroraSlice = _auroraTarget - nHClock; \
+			ExecuteWithIRQ(_auroraSlice, nHIRQCycles); \
+			nHClock = _auroraTarget; \
+		} \
+	} while (0)
 
-    // execute CPU during scanline
-#if SNDBG_LOG
-	Uint32 _tCPU = ProfCtrGetCycle();
-#endif
-    ExecuteWithIRQ(SNES_CYCLESPERLINE - SNES_HBLANKCYCLES, nHIRQCycles);
-#if SNDBG_LOG
-	g_TmgCycCPU += ProfCtrGetCycle() - _tCPU;
-#endif
+#define AURORA_V7_ACCOUNT_STEAL(_clocks) do { \
+		Int32 _auroraSteal = (Int32)(_clocks); \
+		Int32 _auroraRoom = SNES_CYCLESPERLINE - nHClock; \
+		if (_auroraSteal > _auroraRoom) _auroraSteal = _auroraRoom; \
+		if (_auroraSteal > 0) { \
+			ExecuteWithIRQ(_auroraSteal, nHIRQCycles); \
+			nHClock += _auroraSteal; \
+		} \
+	} while (0)
 
-	// set h-blank enable flag
-	m_IO.m_Regs.hvbjoy|= 0x40;
+	/* HVBJOY reports the tiny HBlank wrap interval at the beginning of a
+	 * scanline as well as the long HBlank at the end. */
+	m_IO.m_Regs.hvbjoy |= 0x40;
+	AURORA_V7_RUN_TO(SNES_HBLANK_WRAP_CYCLES);
+	m_IO.m_Regs.hvbjoy &= ~0x40;
 
-    // are we not in vblank?
-    if ( !(m_IO.m_Regs.hvbjoy & 0x80) )
-    {
-        // perform HDMA
+	/* HDMA setup belongs near H=12 on line zero, not before BeginFrame(). */
+	if (m_uLine == 0 && nHClock < SNES_CYCLESPERLINE)
+	{
+		Int32 nBefore;
+		Int32 nStolen;
+
+		AURORA_V7_RUN_TO(nHDMASetupCycle);
+		nBefore = m_Cpu.Cycles;
+		m_DMAC.BeginHDMA();
+		nStolen = nBefore - m_Cpu.Cycles;
+		AURORA_V7_ACCOUNT_STEAL(nStolen);
+	}
+
+	/* Keep the 40-clock aggregate refresh cost, now at the revision-2
+	 * DMA-divider-aligned horizontal position instead of H=0. */
+	AURORA_V7_RUN_TO(nDRAMRefreshCycle);
+	if (nHClock < SNES_CYCLESPERLINE)
+	{
+		SNCPUConsumeCycles(&m_Cpu, SNES_DRAM_REFRESH_CYCLES);
+		AURORA_V7_ACCOUNT_STEAL(SNES_DRAM_REFRESH_CYCLES);
+	}
+
+	/* Normal HBlank starts at H=1096. */
+	AURORA_V7_RUN_TO(SNES_HBLANK_START_CYCLE);
+	m_IO.m_Regs.hvbjoy |= 0x40;
+
+	/* HDMA starts eight clocks into HBlank, at H=1104. */
+	AURORA_V7_RUN_TO(SNES_HDMA_START_CYCLE);
+	if (!(m_IO.m_Regs.hvbjoy & 0x80) && nHClock < SNES_CYCLESPERLINE)
+	{
+		Int32 nBefore = m_Cpu.Cycles;
 #if SNDBG_LOG
 		Uint32 _tHDMA = ProfCtrGetCycle();
 #endif
-        m_DMAC.ProcessHDMA(m_uLine);
+		m_DMAC.ProcessHDMA(m_uLine);
 #if SNDBG_LOG
 		g_TmgCycHDMA += ProfCtrGetCycle() - _tHDMA;
 #endif
-    }
+		Int32 nStolen = nBefore - m_Cpu.Cycles;
+		AURORA_V7_ACCOUNT_STEAL(nStolen);
+	}
 
-    // execute CPU during h-blank
-#if SNDBG_LOG
-	_tCPU = ProfCtrGetCycle();
-#endif
-    ExecuteWithIRQ(SNES_HBLANKCYCLES, nHIRQCycles);
-#if SNDBG_LOG
-	g_TmgCycCPU += ProfCtrGetCycle() - _tCPU;
-#endif
+	AURORA_V7_RUN_TO(SNES_CYCLESPERLINE);
 
-	// O hardware GSU roda em paralelo com o 65816. Este emulador sincroniza
-	// os dois uma vez por scanline, como uma aproximacao de baixo custo para
-	// o PS2: ~370 instrucoes em 10,7 MHz e ~925 em 21,4 MHz.
+	/* The PPU beam wraps regardless of whether a DMA debt carries into the
+	 * following line. */
+	m_IO.m_Regs.hvbjoy &= ~0x40;
+
+#undef AURORA_V7_ACCOUNT_STEAL
+#undef AURORA_V7_RUN_TO
+
+	// GSU runs in parallel; preserve Aurora's low-cost per-scanline model.
 	if (m_bSuperFX && m_GSU.IsRunning())
 	{
 #if SNDBG_LOG
 		Uint32 _tGSU = ProfCtrGetCycle();
 #endif
-		m_GSU.Run(m_GSU.GetLineInstructionBudget());
+		/* AURORA_V8_GSU_CLOCK_SCHEDULER
+		 * The GSU core now charges cache/external-memory clocks internally.
+		 * Give it one 21.47-MHz master-clock scanline (1364 clocks) rather
+		 * than an arbitrary instruction count; CLSR is accounted in the core. */
+		m_GSU.Run(m_GSU.GetLineClockBudget());
 #if SNDBG_LOG
 		g_TmgCycGSU += ProfCtrGetCycle() - _tGSU;
 #endif
@@ -1593,13 +2025,14 @@ void SnesSystem::ExecuteLine()
 	if (m_bSuperFX && m_GSU.IrqPending())
 		SNCPUSignalIRQ(&m_Cpu, 1);
 
-	// clear h-blank enable flag
-	m_IO.m_Regs.hvbjoy&= ~0x40;
+#if SNES_HVIRQ_RESCHEDULE
 	m_bLineIRQActive = FALSE;
 	m_bLineIRQReschedule = FALSE;
 	m_bLineIRQInstant = FALSE;
 	m_nLineIRQCycle = -1;
 	m_nLineIRQClock = SNES_CYCLESPERLINE;
+#endif
+
 	PROF_LEAVE("ExecLine");
 }
 
@@ -1608,11 +2041,28 @@ void SnesSystem::ExecuteLine()
 
 void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, CMixBuffer *pSound, ModeE eMode)
 {
-    m_uLine = 0;
+Bool bPAL = FALSE;
 
-	/* The hidden frame-wrap line is line 0, not a continuation of VBlank.
-	   Keep the internal HDMA gate in sync with the live $4212 value too. */
-	m_IO.m_Regs.hvbjoy &= ~0x80;
+if (g_SnesForceRegion == SNES_FORCE_REGION_PAL)
+{
+    bPAL = TRUE;
+}
+else
+if (g_SnesForceRegion == SNES_FORCE_REGION_NTSC_U ||
+    g_SnesForceRegion == SNES_FORCE_REGION_NTSC_J)
+{
+    bPAL = FALSE;
+}
+else
+if (m_pRom)
+{
+    bPAL = (m_pRom->m_eVideoType == SNROM_VIDEO_PAL);
+}
+
+m_PPU.SetRegionPAL(bPAL);
+    m_uLine = 0;
+    /* AURORA_FCEUMM_FDS_V8_1_COMPAT_REVIEW_20260827: line zero is never part of VBlank. */
+    m_IO.m_Regs.hvbjoy &= ~0x80;
 
 #if SNDBG_LOG
 	#if SNDBG_DEEP
@@ -1677,8 +2127,7 @@ void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, 
         SnesDebug("frame\n");
 #endif
 
-	m_DMAC.BeginHDMA();
-
+	/* AURORA_V7_HDMA_SETUP_MOVED: BeginHDMA() agora ocorre em H=12..19 (fase DMA) da linha 0. */
 	m_PPURender.BeginRender(pTarget);
 	m_PPU.BeginFrame();
 	
@@ -1722,7 +2171,7 @@ void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, 
     m_IO.m_Regs.rdnmi |= 0x80;
     SNCPUSignalNMI(&m_Cpu, m_IO.m_Regs.rdnmi & m_IO.m_Regs.nmitimen & 0x80);
 
-    for ( ; m_uLine < 262; m_uLine++)
+    for ( ; m_uLine < (bPAL ? 312 : 262); m_uLine++)
 	{
 		ExecuteLine();
 
@@ -1931,14 +2380,12 @@ void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, 
 				(unsigned)pCPU, (unsigned)pPPU, (unsigned)pGSU,
 				(unsigned)pAPU, (unsigned)pMix, (unsigned)pMDMA,
 				(unsigned)pHDMA);
-			DLog("[snes-render] bg+compose=%u%% mode7=%u%% obj=%u%% blend=%u%% dsp=%u/%u hirq=%d..%d n=%u rearm/instant=%u/%u",
+			DLog("[snes-render] bg+compose=%u%% mode7=%u%% obj=%u%% blend=%u%% dsp=%u/%u hirq=%d..%d n=%u",
 				(unsigned)pPPUOther, (unsigned)pM7, (unsigned)pObj,
 				(unsigned)pBlend,
 				(unsigned)g_TmgDspRd, (unsigned)g_TmgDspWr,
 				(int)g_TmgIrqLineMin, (int)g_TmgIrqLineMax,
-				(unsigned)g_TmgIrqCount,
-				(unsigned)g_TmgIrqRearms,
-				(unsigned)g_TmgIrqInstant);
+				(unsigned)g_TmgIrqCount);
 			DLog("[snes-hot-bg] schema=topgear-r29 pct sync/info/off/map/chr/main/sub/cmath=%u/%u/%u/%u/%u/%u/%u/%u",
 				(unsigned)pPPUSync, (unsigned)pBGInfo,
 				(unsigned)pBGOffset, (unsigned)pBGMap,
@@ -1970,10 +2417,6 @@ void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, 
 				(unsigned)g_DbgBGActiveLayers,
 				(unsigned)g_DbgBGMapReloads,
 				(unsigned)g_DbgBGChrRows);
-			DLog("[snes-bg-rows] total/blank/repeat=%u/%u/%u",
-				(unsigned)g_DbgBGChrRows,
-				(unsigned)g_DbgBGChrBlankRows,
-				(unsigned)g_DbgBGChrRepeatRows);
 			DLog("[snes-obj] ports oam=%u vram=%u cgram=%u | lines=%u refs=%u tiles=%u range/time=%u/%u",
 				(unsigned)g_DbgOAMWrites, (unsigned)g_DbgVRAMWrites,
 				(unsigned)g_DbgCGRAMWrites, (unsigned)g_DbgObjEnabledLines,
@@ -1990,13 +2433,6 @@ void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, 
 			DLog("[snes-audio] samples=%u avg/frame=%u",
 				(unsigned)g_DbgAudioSamples,
 				(unsigned)(g_DbgAudioSamples / g_TmgWinFrames));
-			DLog("[snes-cgram] bytes/commits/unchanged=%u/%u/%u",
-				(unsigned)g_DbgCGRAMWrites,
-				(unsigned)g_DbgCGRAMCommits,
-				(unsigned)g_DbgCGRAMUnchanged);
-			DLog("[snes-video] rendered/skipped=%u/%u",
-				(unsigned)g_DbgVideoRenderedFrames,
-				(unsigned)g_DbgVideoSkippedFrames);
 			#if SNDBG_DEEP
 			DLog("[snes-obj-deep] opaque/empty=%u/%u pixels candidate/drawn=%u/%u edge-tiles=%u | regs obsel=%02X tm=%02X ts=%02X first=%u",
 				(unsigned)g_DbgObjOpaqueTiles, (unsigned)g_DbgObjEmptyLines,
@@ -2109,17 +2545,11 @@ void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, 
 			g_TmgDspRd      = 0;
 			g_TmgDspWr      = 0;
 			g_TmgIrqCount   = 0;
-			g_TmgIrqRearms  = 0;
-			g_TmgIrqInstant = 0;
 			g_TmgIrqLineMin = 9999;
 			g_TmgIrqLineMax = -1;
 			g_DbgOAMWrites = 0;
 			g_DbgVRAMWrites = 0;
 			g_DbgCGRAMWrites = 0;
-			g_DbgCGRAMCommits = 0;
-			g_DbgCGRAMUnchanged = 0;
-			g_DbgVideoRenderedFrames = 0;
-			g_DbgVideoSkippedFrames = 0;
 			g_DbgObjEnabledLines = 0;
 			g_DbgObjOamRefs = 0;
 			g_DbgObjTiles = 0;
@@ -2162,8 +2592,6 @@ void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, 
 			g_DbgBGActiveLayers = 0;
 			g_DbgBGMapReloads = 0;
 			g_DbgBGChrRows = 0;
-			g_DbgBGChrBlankRows = 0;
-			g_DbgBGChrRepeatRows = 0;
 			m_GSU.ClearDiagWindow();
 		}
 		g_DbgCaptureActive = FALSE;
@@ -2176,6 +2604,9 @@ void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, 
 
 Int32 SnesSystem::GetSRAMBytes()
 {
+    /* AURORA_SWC_FLOPPY_V1_20260831 */
+    if (m_bSuperWildCard)
+        return 0x8000;
     if (m_pRom)
     {
         return m_pRom->GetSRAMBytes();
@@ -2187,6 +2618,9 @@ Int32 SnesSystem::GetSRAMBytes()
 
 Uint8 *SnesSystem::GetSRAMData()
 {
+    /* AURORA_SWC_FLOPPY_V1_20260831 */
+    if (m_bSuperWildCard)
+        return m_SRam;
     if (m_pRom && (m_pRom->GetSRAMBytes()>0))
     {
         return m_SRam;

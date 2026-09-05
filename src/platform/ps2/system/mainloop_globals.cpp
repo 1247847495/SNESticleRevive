@@ -20,8 +20,18 @@
 #include "snstate.h"
 #include "snrom.h"
 #include "nessystem.h"
+/* AURORA_FCEUMM_FDS_V0_5_GLOBAL */
+#include "nes/fceumm/fdssystem.h"
 #include "nesrom.h"
 #include "nesstate.h"
+#include "segasystem.h"
+#include "segarom.h"
+/* AURORA_PCE_EXPERIMENTAL_V1 */
+#include "pcesystem.h"
+#include "pcerom.h"
+/* AURORA_SNES9X2010_V1 */
+#include "snes9x2010system.h"
+#include "snes9x2010rom.h"
 #include "emusys.h"
 #include "emumovie.h"
 #include "rendersurface.h"
@@ -48,6 +58,7 @@ CNetworkScreen *_MainLoop_pNetworkScreen;
 CMenuScreen    *_MainLoop_pMenuScreen;
 CMenuScreen    *_MainLoop_pStateScreen;
 CMenuScreen    *_MainLoop_pStateDeviceScreen;
+CMenuScreen    *_MainLoop_pStateConfirmScreen;
 CMenuScreen    *_MainLoop_pMemCardFormatScreen;
 CLogScreen     *_MainLoop_pLogScreen;
 CVideoScreen   *_MainLoop_pVideoScreen;
@@ -67,18 +78,28 @@ SnesRom    *_pSnesRom;
    input -- that part of mainloop_input.cpp is still gated for
    Phase 5 (FDS support). */
 NesSystem   *_pNes;
+FdsSystem   *_pFds; /* AURORA_FCEUMM_FDS_V0_5_GLOBAL */
 NesRom      *_pNesRom;
 NesFDSBios  *_pNesFDSBios;
 NesDisk     *_pNesFDSDisk;
 Int32        _MainLoop_iDisk          = 0;
 Bool         _MainLoop_bDiskInserted  = FALSE;
 
+/* AURORA_PICODRIVE_STAGE2 */
+SegaSystem  *_pSega;
+SegaRom     *_pSegaRom;
+PceSystem   *_pPce;
+PceRom      *_pPceRom;
+/* AURORA_SNES9X2010_V1 */
+Snes9x2010System *_pSnes9x2010;
+Snes9x2010Rom    *_pSnes9x2010Rom;
+
 Char _RomName[256];
 Char _RomPath[1024];
 
 #if MAINLOOP_MEMCARD
 Char _SramPath[256] = "mc0:/SNESticle";
-Char _MainLoop_SaveTitle[] = "SNESticle Revive";
+Char _MainLoop_SaveTitle[] = "SNESticle Aurora";
 #else
 Char _SramPath[256] = "host0:/cygdrive/d/emu/";
 #endif
@@ -97,10 +118,13 @@ Uint32 _MainLoop_uBlenderTBP = 0;
 CWavFile _WavFile;
 #endif
 
-/* 8MB+1KB: cobre LoROM/HiROM ate 4MB E ExLoROM (Jumbo) ate 8MB/64Mbit,
-   usado por hacks grandes de SMW expandidas pelo Lunar Magic. Cabe folgado
-   nos 32MB da PS2. */
-Uint8 _RomData[8 * 1024 * 1024 + 1024] __attribute__((aligned(64))) __attribute__ ((section (".bss")));
+/* AURORA_DYNAMIC_ROM_BUFFER_V1_20260823
+ * Frontend-owned ROM backing. NULL/0 while no game is active.
+ * SNESticle and PicoDrive can retain pointers into this storage, so it stays
+ * alive through the whole cartridge lifetime and is freed only after Unload.
+ */
+Uint8 *_RomData = NULL;
+Uint32 _RomDataCapacity = 0;
 
 SnesStateT		_SnesState;
 NesStateT		_NesState;
@@ -135,3 +159,4 @@ Uint32 _MainLoop_uDebugDisplay = 0;
 
 Uint32 _uInputFrame;
 Uint32 _uInputChecksum[5];
+

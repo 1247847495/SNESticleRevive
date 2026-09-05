@@ -27,9 +27,13 @@ CLogScreen::CLogScreen()
 
 void CLogScreen::AddMessage(const char *pStr)
 {
+	/* AURORA_RUNTIME_SAFE_LOG_STRINGS_V1_4_2 */
 	if (m_nMessages < UILOG_NUMMESSAGES)
 	{
-		strcpy(m_Messages[m_nMessages], pStr);
+		if (!pStr)
+			pStr = "";
+		strncpy(m_Messages[m_nMessages], pStr, UILOG_MESSAGECHARS - 1);
+		m_Messages[m_nMessages][UILOG_MESSAGECHARS - 1] = '\0';
 		m_nMessages++;
 		m_iScroll = m_nMessages - m_nDisplayLines;
 	}
@@ -65,7 +69,7 @@ void CLogScreen::Draw()
 	FontColor4f(0.0, 0.8f, 0.8f, 1.0f);
 
 	vx = 10;
-	_MenuHeader(vy, "Message Log");
+	_MenuHeader(vy, "消息日志");
 	vy+=FontGetHeight() * 2;
 
 	FontColor4f(1.0f, 1.0f, 1.0f, 1.0f);   // -> amber via FontColor4f remap

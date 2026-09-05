@@ -33,9 +33,7 @@ extern "C" {
 
 typedef char SNPPUScratchLayoutCheck[
 	(sizeof(SnesRender8pInfoT) <= SNPPU_DMA_BLENDINFO_OFFSET &&
-	 SNPPU_DMA_BLENDINFO_OFFSET + sizeof(SNPPUBlendInfoT) <=
-		PS2MEM_SNES_LOOKUP_OFFSET &&
-	 PS2MEM_SNES_LOOKUP_OFFSET + PS2MEM_SNES_LOOKUP_SIZE <= 16 * 1024)
+	 SNPPU_DMA_BLENDINFO_OFFSET + sizeof(SNPPUBlendInfoT) <= 16 * 1024)
 		? 1 : -1];
 
 #if SNDBG_LOG
@@ -106,6 +104,8 @@ static void _SNPPUGSValidateStage(const SNPPUBlendInfoT *pInfo)
 
 #define SNPPUBLEND_PAL32 (TRUE)
 
+extern SnesChrLookupT _SnesPPU_PlaneLookup[2];
+
 static Uint32 _SNPPUBlend_AttribMainPal[8] _ALIGN(16) =
 {                   // HSM
     0x00000000,     // 000
@@ -136,10 +136,7 @@ static Uint32 _SNPPUBlend_AttribSubPal[8] _ALIGN(16) =
 static void _PlanarTo3(Uint8 *pDest, SNMaskT *pSrc0, SNMaskT *pSrc1, SNMaskT *pSrc2)
 {
 	Uint32 nBytes = 256 / 8;
-	SnesChrLookupT *pPlaneLookup =
-		(SnesChrLookupT *)PS2MEM_SNES_LOOKUP_ADDR;
-	SnesChrLookup64T *pLookup64 =
-		(SnesChrLookup64T *)&pPlaneLookup[1];
+	SnesChrLookup64T *pLookup64 = (SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
 	Uint64 *pDest64 = (Uint64 *)pDest;
 
 
@@ -534,11 +531,18 @@ void SNPPUBlendGS::End()
 
     GPFifoResume();
 
-    GSGifTagOpenAD();
-    // reset frame register
-	GSGifRegAD(GS_REG_FRAME_1, GS_GetFrameReg());
-	GSGifRegAD(GS_REG_XYOFFSET_1, GS_GetOffsetReg());
-    GSGifTagCloseAD();
+    /* AURORA_BLEND_POST_RESTORE_ELIDE_V2
+     *
+     * The legacy path queued FRAME_1/XYOFFSET_1 restoration here, but this
+     * newly-resumed raw list is not dispatched until the end-of-frame
+     * GPFifoFlush(). Modern MainLoopRender calls GSK_ResetFrame() BEFORE its
+     * first gsKit primitive, restoring FRAME_1, XYOFFSET_1, ALPHA_1 and
+     * COLCLAMP in the actual draw queue that needs them.
+     *
+     * No host GS primitive is issued between this End() and that reset during
+     * gameplay. Leave the raw list at its exact idle state (one open CNT tag)
+     * so GPFifoFlush() can take its empty-list fast path instead of sending a
+     * two-register restore chain that is already superseded. */
 
     /* The blender chain has just rendered into _OutTex via raw GIF
        DMA (FRAME_1 = uOutAddr). The next gsKit textured prim that
@@ -948,8 +952,16 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
 		                      m_DmaListWithPalette.uOutAddr, TRUE,
 		                      bApplyIntensity, bDirectMain);
 
-        // flush cache
-        FlushCache(0);
+        /* AURORA_V83_BLENDLIST_RANGE_DCACHE
+         * Only the two 2 KiB command templates were rewritten above.
+         * Their DMA_REF payloads point at the dedicated EE scratchpad staging
+         * area, so there is no cached external payload to write back here.
+         * Keep the emulator's unrelated D-cache resident. */
+        SyncDCache(m_DmaList.Data,
+                   (Uint8 *)m_DmaList.Data + sizeof(m_DmaList.Data) - 1);
+        SyncDCache(m_DmaListWithPalette.Data,
+                   (Uint8 *)m_DmaListWithPalette.Data +
+                       sizeof(m_DmaListWithPalette.Data) - 1);
 
         m_pDmaBlendInfo = pInfo;
         m_bDmaListHasIntensity = bApplyIntensity;

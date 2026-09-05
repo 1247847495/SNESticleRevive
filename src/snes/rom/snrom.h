@@ -22,6 +22,20 @@ enum SNRomVideoE
 	SNROM_VIDEO_NUM
 };
 
+enum SnesForceRegionE
+{
+    SNES_FORCE_REGION_OFF,
+    SNES_FORCE_REGION_NTSC_U,
+    SNES_FORCE_REGION_NTSC_J,
+    SNES_FORCE_REGION_PAL,
+
+    SNES_FORCE_REGION_NUM
+};
+
+extern SnesForceRegionE g_SnesForceRegion;
+/* AURORA_TOP_GEAR_FASTROM_V1: exact-CRC runtime flag. */
+extern Bool g_SnesCompatTopGearFastRom;
+
 enum SNRomMappingE
 {
 	SNROM_MAPPING_LOROM,
@@ -43,10 +57,12 @@ enum SNRomMappingE
 #define SNROM_FLAG_SDD1		0x200
 #define SNROM_FLAG_SRTC		0x400
 #define SNROM_FLAG_DSP3		0x800
-#define SNROM_FLAG_DSP4		0x1000
-#define SNROM_FLAG_DSP1_TARGET_Y_SUBTRACT 0x2000
-#define SNROM_FLAG_DSP1_ORIGINAL_OP28      0x4000
-#define SNROM_FLAG_PILOTWINGS_DYNAMIC_HVIRQ 0x8000
+#define SNROM_FLAG_DSP4    0x1000
+/* AURORA_UPSTREAM_20260827_DSP1_OP28_REVISION_V1 */
+#define SNROM_FLAG_DSP1_ORIGINAL_OP28 0x2000
+
+extern Uint32 g_FakeSRAMSize;
+void SnesRomResetRuntimeCompatForExternalDevice(void); /* AURORA_SWC_MEGA_V9_20260831 */
 
 struct SNRomInfoT
 {

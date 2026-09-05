@@ -4,23 +4,280 @@
 #include <string.h>
 #include "types.h"
 #include "snrom.h"
+#include "snio.h"
 #include "dataio.h"
 #include "sndbglog.h"
+Uint32 g_FakeSRAMSize = 0;
+SnesForceRegionE g_SnesForceRegion = SNES_FORCE_REGION_OFF;
 
-/* Standard CRC32 of the normalized, headerless ROM image.  Compatibility
-   quirks are gated by exact clean dumps so they cannot leak into another
-   DSP-1 title such as Super Mario Kart. */
-static Uint32 _SNRomCRC32(const Uint8 *pData, Uint32 nBytes)
+/* AURORA_SONIC_BLAST_MAN_COLOR_V7
+ * Runtime-only renderer compatibility flag. It is reset on every ROM load.
+ * No Sonic Blast Man ROM byte is modified. */
+Bool g_SnesCompatSonicBlastManColorMath = FALSE;
+
+/* AURORA_CRC_ZERO_INIT_DB_V8
+ * Set from the normalized/headerless ROM CRC before any in-memory ROM patch.
+ * SnesSystem consumes it only while attaching a new cartridge. */
+Bool g_SnesCompatZeroInit = FALSE;
+
+/* AURORA_HK97_SPC_BOOT_DB_V9
+ * Exact-CRC runtime flag for Hong Kong '97. This does not patch ROM bytes.
+ * Both known 512 KiB images are accepted:
+ *   11A6E64B = standard PD image
+ *   C6A95816 = CM variant
+ */
+Bool g_SnesCompatHongKong97SPCBoot = FALSE;
+
+/* AURORA_TOP_GEAR_FASTROM_V1
+ * Exact clean normalized/headerless ROMs only. No ROM bytes are modified. */
+Bool g_SnesCompatTopGearFastRom = FALSE;
+
+/* AURORA_SUNSET_RIDERS_CRC_OBJ128_V2_ROM_20260825
+ * Diagnostic-only exact-CRC flag. CRC is from normalized/headerless ROM data.
+ * No ROM bytes are modified.
+ *   52ADA404 = Sunset Riders (USA)
+ *   64EDFC5D = Sunset Riders (Europe) */
+Bool g_SnesCompatSunsetRidersObj128 = FALSE;
+
+/* AURORA_SWC_FLOPPY_V1_20260831
+ * Sunset Riders OBJ128 experiment did not fix the reported graphics.
+ * Preserve it for A/B work but keep release/default builds off. */
+#ifndef SNES_SUNSET_RIDERS_OBJ128_HACK
+#define SNES_SUNSET_RIDERS_OBJ128_HACK 0
+#endif
+
+/* AURORA_SWC_MEGA_V9_20260831
+ * SnesRom::LoadRom() selects exact-CRC compatibility/accessory globals for a
+ * normal cartridge boot. A ROM merely exposed behind the SWC is not the
+ * running SNES cartridge, so clear those parser-global selections again.
+ */
+void SnesRomResetRuntimeCompatForExternalDevice(void)
 {
-	Uint32 crc = 0xFFFFFFFFu;
-	while (nBytes--)
-	{
-		crc ^= *pData++;
-		for (Uint32 bit = 0; bit < 8; bit++)
-			crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0u);
-	}
-	return crc ^ 0xFFFFFFFFu;
+    SnesTurboFileSelectForCRC(0);
+    g_SnesCompatSonicBlastManColorMath = FALSE;
+    g_SnesCompatZeroInit = FALSE;
+    g_SnesCompatHongKong97SPCBoot = FALSE;
+    g_SnesCompatTopGearFastRom = FALSE;
+    g_SnesCompatSunsetRidersObj128 = FALSE;
 }
+
+static Uint32 _SNRomRuntimeCRC32(const Uint8 *pData, Uint32 nBytes)
+{
+    Uint32 crc = 0xFFFFFFFFu;
+    while (nBytes--)
+    {
+        crc ^= *pData++;
+        for (Uint32 bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0u);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+#ifndef SNES_HK97_SPC_BOOT
+#define SNES_HK97_SPC_BOOT 0
+#endif
+
+#if SNES_HK97_SPC_BOOT
+static Uint32 _SNRomHK97CRC32(const Uint8 *pData, Uint32 nBytes)
+{
+    Uint32 crc = 0xFFFFFFFFu;
+    while (nBytes--)
+    {
+        crc ^= *pData++;
+        for (Uint32 bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0u);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+#endif
+
+/* AURORA_CRC_COMPAT_DB_V6
+ * Tiny CRC-gated ROM compatibility database.
+ *
+ * Sources represented here:
+ *   - SNESAdvance SuperDAT ordinary-byte patches for Lost Vikings 1 (USA)
+ *     and The Addams Family (USA).
+ *   - GameHacking.org-generated Lost Vikings 2 cheat data; Snes9x's standard
+ *     SNES Game Genie decoder maps E1E7-CFD4 -> $80FA34=F6 and
+ *     DDE7-CF04 -> $80FA35=00. For normal LoROM $80:FA34 maps to file $7A34.
+ *   - No-Intro 2026-08-01 CRC32 values identify clean regional layouts.
+ *
+ * Cross-region entries intentionally reuse the same payload/offsets. They are
+ * exact-CRC isolated and can all be disabled with SNES_ROM_COMPAT_REGIONAL=0.
+ */
+#ifndef SNES_ROM_COMPAT_PATCHES
+#define SNES_ROM_COMPAT_PATCHES 0
+#endif
+#ifndef SNES_ROM_COMPAT_REGIONAL
+#define SNES_ROM_COMPAT_REGIONAL 1
+#endif
+#ifndef SNES_CRC_ZERO_INIT
+#define SNES_CRC_ZERO_INIT 0
+#endif
+#ifndef SNES_TOP_GEAR_FASTROM_HACK
+#define SNES_TOP_GEAR_FASTROM_HACK 0
+#endif
+
+#if SNES_CRC_ZERO_INIT || SNES_TOP_GEAR_FASTROM_HACK
+/* AURORA_CRC_ZERO_INIT_DB_V8
+ * Exact CRC32 allow-list. CRC is computed after copier-header removal /
+ * deinterleaving and before V6 mutates any ROM bytes.
+ *
+ * Included:
+ *   Hong Kong '97 (standard + CM)
+ *   Lost Vikings 1 (U/E/F/G/S/J)
+ *   Lost Vikings 2 (U/E)
+ *   The Addams Family (U/E/J)
+ *   Sonic Blast Man (U/E/J)
+ *   Speedy Gonzales - Los Gatos Bandidos (USA + Rev 1)
+ *   Top Gear / Top Racer (U/E/J)
+ *   Super Mario World 2 - Yoshi's Island / Yossy Island (U/E/J revisions)
+ *
+ * Pilotwings is intentionally NOT included:
+ *   USA 266C44ED, Japan 77871727, Europe DEF45776.
+ */
+static Uint32 _SNRomZeroInitCRC32(const Uint8 *pData, Uint32 nBytes)
+{
+    Uint32 crc = 0xFFFFFFFFu;
+    while (nBytes--)
+    {
+        crc ^= *pData++;
+        for (Uint32 bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0u);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+static Bool _SNRomNeedsZeroInit(Uint32 crc)
+{
+    switch (crc)
+    {
+        /* Hong Kong '97 */
+        case 0x11A6E64Bu:
+        case 0xC6A95816u:
+
+        /* The Lost Vikings 1 */
+        case 0x6838BE08u:
+        case 0x66989491u:
+        case 0x94093298u:
+        case 0x4EE705ABu:
+        case 0x6E8A1081u:
+        case 0x50FEF979u:
+
+        /* The Lost Vikings 2 / Norse by Norsewest */
+        case 0x3AA01DBDu:
+        case 0x3C49A285u:
+
+        /* The Addams Family */
+        case 0x2E8034ABu:
+        case 0x82497F19u:
+        case 0xCD80351Cu:
+
+        /* Sonic Blast Man */
+        case 0x8886396Eu:
+        case 0x5441F25Bu:
+        case 0xBE523800u:
+
+        /* Speedy Gonzales - Los Gatos Bandidos */
+        case 0xE2DBAD76u:
+        case 0xCB0653D0u:
+
+        /* Top Gear / Top Racer */
+        case 0xD34C49B7u:
+        case 0xB0150052u:
+        case 0xE5A57B12u:
+
+        /* Super Mario World 2 - Yoshi's Island */
+        case 0xD138F224u:
+        case 0xCF98DDAAu:
+        case 0x857980B2u:
+        case 0x07E01EF9u:
+        case 0x343E0DFBu:
+        case 0x0F66698Bu:
+        case 0xF1063FADu:
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
+}
+#endif
+
+#if SNES_ROM_COMPAT_PATCHES
+struct SNRomCompatWriteT
+{
+    Uint32 Offset;
+    Uint8 Data0;
+    Uint8 Data1;
+};
+
+struct SNRomCompatEntryT
+{
+    Uint32 CRC32;
+    Uint32 RomBytes;
+    const SNRomCompatWriteT *pWrites;
+    Uint8 nWrites;
+};
+
+static Uint32 _SNRomCompatCRC32(const Uint8 *pData, Uint32 nBytes)
+{
+    Uint32 crc = 0xFFFFFFFFu;
+    while (nBytes--)
+    {
+        crc ^= *pData++;
+        for (Uint32 bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0u);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+static const SNRomCompatWriteT _SNRomCompat_LostVikings1[] =
+{
+    { 0x28D83u, 0xEA, 0xEA },
+    { 0x28DF6u, 0xEA, 0xEA },
+    { 0x28E09u, 0xEA, 0xEA },
+};
+
+static const SNRomCompatWriteT _SNRomCompat_AddamsFamily[] =
+{
+    { 0x014E9u, 0xEA, 0xEA },
+    { 0x07870u, 0xEA, 0xEA },
+    { 0x0789Du, 0xEA, 0xEA },
+};
+
+static const SNRomCompatWriteT _SNRomCompat_LostVikings2SkipIntro[] =
+{
+    /* $80FA34=F6, $80FA35=00 -> LoROM file offset $7A34. */
+    { 0x07A34u, 0xF6, 0x00 },
+};
+
+static const SNRomCompatEntryT _SNRomCompatEntries[] =
+{
+    /* Payload documented directly for these USA layouts. */
+    { 0x6838BE08u, 0x100000u, _SNRomCompat_LostVikings1,
+      (Uint8)(sizeof(_SNRomCompat_LostVikings1) / sizeof(_SNRomCompat_LostVikings1[0])) },
+    { 0x2E8034ABu, 0x100000u, _SNRomCompat_AddamsFamily,
+      (Uint8)(sizeof(_SNRomCompat_AddamsFamily) / sizeof(_SNRomCompat_AddamsFamily[0])) },
+    { 0x3AA01DBDu, 0x100000u, _SNRomCompat_LostVikings2SkipIntro,
+      (Uint8)(sizeof(_SNRomCompat_LostVikings2SkipIntro) / sizeof(_SNRomCompat_LostVikings2SkipIntro[0])) },
+
+#if SNES_ROM_COMPAT_REGIONAL
+    /* Lost Vikings 1: Europe, France, Germany, Spain, Japan. */
+    { 0x66989491u, 0x100000u, _SNRomCompat_LostVikings1, 3 },
+    { 0x94093298u, 0x100000u, _SNRomCompat_LostVikings1, 3 },
+    { 0x4EE705ABu, 0x100000u, _SNRomCompat_LostVikings1, 3 },
+    { 0x6E8A1081u, 0x100000u, _SNRomCompat_LostVikings1, 3 },
+    { 0x50FEF979u, 0x100000u, _SNRomCompat_LostVikings1, 3 },
+
+    /* The Addams Family: Europe, Japan. */
+    { 0x82497F19u, 0x100000u, _SNRomCompat_AddamsFamily, 3 },
+    { 0xCD80351Cu, 0x100000u, _SNRomCompat_AddamsFamily, 3 },
+
+    /* Lost Vikings 2 / Norse by Norsewest: Europe. */
+    { 0x3C49A285u, 0x100000u, _SNRomCompat_LostVikings2SkipIntro, 1 },
+#endif
+};
+#endif
 
 /* Pontua um header LoROM candidato em 'base' (deslocamento do $FFC0 da
    metade). Usado para descobrir QUAL metade de uma ROM ExLoROM contem o
@@ -315,17 +572,19 @@ static Bool _SNRomIsValidCartInfo(SNRomInfoT *pCartInfo)
 	return pCartInfo && ((pCartInfo->InverseChecksum ^ pCartInfo->Checksum) == 0xFFFF);
 }
 
-/* Score a checksum-valid candidate before deciding whether the image needs
-   copier Type-1 deinterleaving.  Checking the map byte alone is unsafe: an
-   ordinary game can contain a coincidental checksum/complement pair at the
-   other header address.  Pinocchio (USA), a clean 3 MiB HiROM, is one such
-   case; the inherited checksum-only selection accepted that false LoROM
-   candidate as Type-1 and scrambled the real header before the SNES reset.
-
-   The reset-vector/opcode tests mirror the conservative parts of the header
-   scoring used by current reference emulators.  A bad reset vector rejects
-   the candidate for normal selection, while the legacy Type-1 fallback below
-   remains available when neither physical location can be scored yet. */
+/* AURORA_REVIVE_7C3A5DE_TYPE1_HEADER_SCORING_20260829
+ * Port of ReyFxck/SNESticleRevive commit 7c3a5de:
+ * score checksum-valid LoROM/HiROM candidates before Type-1 deinterleave.
+ *
+ * Checking the map byte alone is unsafe: an ordinary game can contain a
+ * coincidental checksum/complement pair at the other header address.
+ * Pinocchio (USA), a clean 3 MiB HiROM, is one such case; the old code could
+ * treat the false LoROM candidate as Type-1 and scramble the real header.
+ *
+ * The reset-vector/opcode tests mirror the conservative parts of header
+ * scoring used by current reference emulators. A bad reset vector rejects
+ * the candidate for normal selection, while the legacy Type-1 fallback below
+ * remains available when neither physical location can be scored yet. */
 static Int32 _SNRomHeaderScore(const Uint8 *pRom, Uint32 uRomBytes,
 	Uint32 uHeaderOffset, Bool bLoHeader)
 {
@@ -548,21 +807,30 @@ void SnesRom::SetCartInfo(SNRomInfoT *pCartInfo)
 
 		m_eVideoType = pCountry ? pCountry->eVideoType : SNROM_VIDEO_NTSC;
 		m_uROMSize	  = 1 << (pCartInfo->RomSize - 7);
-		switch (pCartInfo->SRAMSize)
+		/* AURORA_ACCURACY_SRAM_SIZE_EXPONENT_V1
+		 * The SNES internal header stores ordinary Game Pak RAM size as an
+		 * exponent.  In bytes the conventional formula is 2^(code + 10);
+		 * m_uSRAMSize is expressed in kilobits, therefore 8 << code.
+		 * Codes through 8 fit Aurora's existing 256 KiB backing store
+		 * (code 8 = 256 KiB). Do not clamp larger declarations
+		 * into that buffer: treating them as absent is safer than aliasing or
+		 * writing past the allocation.  SuperFX may override this value later
+		 * from its extended header, as before. */
+		if (g_FakeSRAMSize)
 		{
-		default:
-		case 0:
+			m_uSRAMSize = g_FakeSRAMSize;
+		}
+		else if (pCartInfo->SRAMSize == 0)
+		{
 			m_uSRAMSize = 0;
-			break;
-		case 1:
-			m_uSRAMSize = 16;
-			break;
-		case 2:
-			m_uSRAMSize = 32;
-			break;
-		case 3:
-			m_uSRAMSize = 64;
-			break;
+		}
+		else if (pCartInfo->SRAMSize <= 8)
+		{
+			m_uSRAMSize = (Uint32)8 << pCartInfo->SRAMSize;
+		}
+		else
+		{
+			m_uSRAMSize = 0;
 		}
 		switch (pCartInfo->RomType)
 		{
@@ -851,9 +1119,26 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 		switch (eRomHdrType)
 		{
 		case SNROM_HDRTYPE_SWC:
-			nRomBytes = RomHdr.SWC.uSize * 1024 * 1024 / 8 / 16;
-			m_eMapping = (RomHdr.SWC.uImageInfo & 0x10)  ? SNROM_MAPPING_HIROM : SNROM_MAPPING_LOROM;
+		{
+			/* AURORA_SWC_PHYSICAL_PAYLOAD_V10_10_20260831
+			 *
+			 * SWC header bytes 0-1 are an 8-KiB page count. Historically
+			 * this loader trusted that count and overwrote nRomBytes.
+			 * A stale/bad copier header can therefore truncate a perfectly
+			 * valid physical payload before a Front copier ever sees it.
+			 *
+			 * nRomBytes was already derived above from the real file length
+			 * after removing the 512-byte copier header. Keep that physical
+			 * payload as the source of truth. The SWC header still selects
+			 * LoROM/HiROM exactly as before.
+			 */
+			const Uint32 uDeclaredBytes =
+				(Uint32)RomHdr.SWC.uSize * 0x2000u;
+			(void)uDeclaredBytes;
+			m_eMapping = (RomHdr.SWC.uImageInfo & 0x10)
+				? SNROM_MAPPING_HIROM : SNROM_MAPPING_LOROM;
 			break;
+		}
 		default:
 		case SNROM_HDRTYPE_UNKNOWN:
 			m_eMapping = SNROM_MAPPING_LOROM;
@@ -909,10 +1194,12 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 	SNRomInfoT *pCartInfo;
 	SNRomInfoT *pLoCartInfo;
 	SNRomInfoT *pHiCartInfo;
+	Bool bOriginalDSP1Op28 = FALSE;
 
-	/* Score both physical header positions first.  Only the best plausible
-	   candidate may request Type-1 conversion; accepting either candidate
-	   unconditionally corrupted clean HiROM images such as Pinocchio. */
+	/* AURORA_REVIVE_7C3A5DE_TYPE1_HEADER_SCORING_20260829
+	 * Score both physical header positions first. Only the best plausible
+	 * candidate may request Type-1 conversion; accepting either candidate
+	 * unconditionally can corrupt clean HiROM images such as Pinocchio. */
 	pLoCartInfo = GetCartInfo(32704);
 	pHiCartInfo = GetCartInfo(65472);
 	Int32 nLoScore = _SNRomHeaderScore(m_pRomData, m_uRomBytes, 32704, TRUE);
@@ -921,7 +1208,7 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 	SNRomInfoT *pBestCartInfo = bBestIsLo ? pLoCartInfo : pHiCartInfo;
 
 	/* Some genuine Type-1 images do not expose a usable reset opcode until
-	   after conversion.  Preserve the old checksum/map fallback, but only
+	   after conversion. Preserve the old checksum/map fallback, but only
 	   when neither normal candidate could be scored. */
 	if (nLoScore <= -1000 && nHiScore <= -1000)
 	{
@@ -958,9 +1245,176 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 		}
 	}
 
-	/* Rescore because Type-1 conversion moves both the header and reset
-	   opcode.  Fall back to the historical checksum-only choice for unusual
-	   homebrew/copier headers which are valid but use an uncommon reset prologue. */
+	/* AURORA_SNES_TURBOFILE_V4_20260829
+	 * Exact normalized/headerless CRC, before compatibility patching. */
+	SnesTurboFileSelectForCRC(
+		(m_pRomData && m_uRomBytes)
+			? _SNRomRuntimeCRC32(m_pRomData, m_uRomBytes) : 0);
+
+	/* AURORA_UPSTREAM_20260827_DSP1_OP28_REVISION_V1
+	 * Identify the untouched normalized/headerless image before any Aurora
+	 * compatibility byte patch can run.  Pilotwings shipped on boards with multiple DSP revisions. Prefer the
+	 * original DSP-1/1A op28 behavior for USA/Japan/Europe; a later PAL
+	 * board revision with DSP-1B cannot be distinguished from ROM data alone.
+	 *   266C44ED = Pilotwings (USA)
+	 *   77871727 = Pilotwings (Japan)
+	 *   DEF45776 = Pilotwings (Europe; DSP-1 and later DSP-1B boards exist) */
+	if (m_pRomData && m_uRomBytes == 0x80000u)
+	{
+		const Uint32 uPilotwingsCRC =
+			_SNRomRuntimeCRC32(m_pRomData, m_uRomBytes);
+		bOriginalDSP1Op28 =
+			(uPilotwingsCRC == 0x266C44EDu) || /* USA */
+			(uPilotwingsCRC == 0x77871727u) || /* Japan */
+			(uPilotwingsCRC == 0xDEF45776u);   /* Europe: prefer original DSP-1 behavior */
+	}
+
+/* AURORA_SONIC_BLAST_MAN_COLOR_V7
+ * Never leak the previous game's renderer workaround into the next load. */
+g_SnesCompatSonicBlastManColorMath = FALSE;
+
+/* AURORA_HK97_SPC_BOOT_DB_V9
+ * Detect the normalized/headerless ROM before any V6 in-memory patching.
+ * The flag is reset on every load so it can never leak to the next game. */
+g_SnesCompatHongKong97SPCBoot = FALSE;
+#if SNES_HK97_SPC_BOOT
+if (m_pRomData && m_uRomBytes == 0x80000u)
+{
+    const Uint32 uHK97CRC = _SNRomHK97CRC32(m_pRomData, m_uRomBytes);
+    g_SnesCompatHongKong97SPCBoot =
+        (uHK97CRC == 0x11A6E64Bu) ||
+        (uHK97CRC == 0xC6A95816u);
+}
+#endif
+
+/* AURORA_SUNSET_RIDERS_CRC_OBJ128_V2_GATE_20260825
+ * Exact clean 1 MiB images only. This runs before any compatibility
+ * byte-patching so altered dumps cannot match by title/header alone. */
+g_SnesCompatSunsetRidersObj128 = FALSE;
+#if SNES_SUNSET_RIDERS_OBJ128_HACK
+if (m_pRomData && m_uRomBytes == 0x100000u)
+{
+    const Uint32 uSunsetRidersCRC =
+        _SNRomRuntimeCRC32(m_pRomData, m_uRomBytes);
+
+    g_SnesCompatSunsetRidersObj128 =
+        (uSunsetRidersCRC == 0x52ADA404u) || /* USA */
+        (uSunsetRidersCRC == 0x64EDFC5Du);   /* Europe */
+}
+#endif
+
+/* AURORA_CRC_ZERO_INIT_DB_V8 + AURORA_TOP_GEAR_FASTROM_V1
+ * Compute the untouched normalized/headerless CRC once, before V6 can mutate
+ * compatibility bytes. The Top Gear timing flag is reset every load. */
+g_SnesCompatZeroInit = FALSE;
+g_SnesCompatTopGearFastRom = FALSE;
+#if SNES_CRC_ZERO_INIT || SNES_TOP_GEAR_FASTROM_HACK
+if (m_pRomData && m_uRomBytes)
+{
+    const Uint32 uCompatIdentityCRC = _SNRomZeroInitCRC32(m_pRomData, m_uRomBytes);
+#if SNES_CRC_ZERO_INIT
+    g_SnesCompatZeroInit = _SNRomNeedsZeroInit(uCompatIdentityCRC);
+#endif
+#if SNES_TOP_GEAR_FASTROM_HACK
+    if (m_uRomBytes == 0x80000u)
+    {
+        g_SnesCompatTopGearFastRom =
+            (uCompatIdentityCRC == 0xD34C49B7u) || /* Top Gear USA */
+            (uCompatIdentityCRC == 0xB0150052u) || /* Top Gear Europe */
+            (uCompatIdentityCRC == 0xE5A57B12u);   /* Top Racer Japan */
+    }
+#endif
+}
+#endif
+
+#if SNES_ROM_COMPAT_PATCHES
+	/* AURORA_CRC_COMPAT_DB_V6
+	 * Apply only after copier deinterleaving, so CRC32 and offsets refer to the
+	 * normalized/headerless ROM image.  CRC is the identity gate requested by
+	 * the compatibility policy; valid LoROM + exact size are cheap extra guards.
+	 * No expected-original-byte signature is required.
+	 */
+	if (m_uRomBytes == 0x100000u && _SNRomIsValidCartInfo(pLoCartInfo))
+	{
+		const Uint32 uCompatCRC = _SNRomCompatCRC32(m_pRomData, m_uRomBytes);
+
+#if SNES_SONIC_COLOR_WORKAROUND
+		/* Sonic Blast Man clean 1 MiB dumps: USA / Europe / Japan.
+		 * The renderer uses this only to suppress CGADSUB color math. */
+		g_SnesCompatSonicBlastManColorMath =
+			(uCompatCRC == 0x8886396Eu) ||
+			(uCompatCRC == 0x5441F25Bu) ||
+			(uCompatCRC == 0xBE523800u);
+#endif
+
+		const SNRomCompatEntryT *pCompat = NULL;
+
+		for (Uint32 i = 0;
+		     i < (Uint32)(sizeof(_SNRomCompatEntries) / sizeof(_SNRomCompatEntries[0]));
+		     ++i)
+		{
+			if (_SNRomCompatEntries[i].CRC32 == uCompatCRC &&
+			    _SNRomCompatEntries[i].RomBytes == m_uRomBytes)
+			{
+				pCompat = &_SNRomCompatEntries[i];
+				break;
+			}
+		}
+
+		if (pCompat)
+		{
+			Bool bBoundsOK = TRUE;
+			for (Uint32 i = 0; i < pCompat->nWrites; ++i)
+			{
+				if (pCompat->pWrites[i].Offset + 1u >= m_uRomBytes)
+				{
+					bBoundsOK = FALSE;
+					break;
+				}
+			}
+
+			if (bBoundsOK)
+			{
+				Bool bWritable = (m_pRomMem != NULL) ? TRUE : FALSE;
+				if (!bWritable)
+				{
+					Uint8 *pCompatCopy = (Uint8 *)malloc(m_uRomBytes);
+					if (pCompatCopy)
+					{
+						memcpy(pCompatCopy, m_pRomData, m_uRomBytes);
+						m_pRomMem = pCompatCopy;
+						m_pRomData = pCompatCopy;
+						bWritable = TRUE;
+					}
+				}
+
+				if (bWritable)
+				{
+					for (Uint32 i = 0; i < pCompat->nWrites; ++i)
+					{
+						const SNRomCompatWriteT *pWrite = &pCompat->pWrites[i];
+						m_pRomData[pWrite->Offset + 0] = pWrite->Data0;
+						m_pRomData[pWrite->Offset + 1] = pWrite->Data1;
+					}
+
+					/* Copying changes the base pointer. Rebuild header pointers before
+					 * mapper detection stores m_pCartInfo. */
+					pLoCartInfo = GetCartInfo(32704);
+					pHiCartInfo = GetCartInfo(65472);
+				}
+			}
+		}
+	}
+#endif
+
+	/* AURORA_REVIVE_7C3A5DE_TYPE1_HEADER_SCORING_20260829
+	 * Rescore because Type-1 conversion moves both the header and reset
+	 * opcode. This is deliberately done here, after Aurora compatibility
+	 * handling too, so any rebuilt ROM/header pointers are current.
+	 *
+	 * Fall back to the historical checksum-only choice for unusual
+	 * homebrew/copier headers which are valid but use an uncommon reset
+	 * prologue. */
 	nLoScore = _SNRomHeaderScore(m_pRomData, m_uRomBytes, 32704, TRUE);
 	nHiScore = _SNRomHeaderScore(m_pRomData, m_uRomBytes, 65472, FALSE);
 	if (nLoScore > -1000 || nHiScore > -1000)
@@ -1034,26 +1488,10 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 		m_eMapping = SNROM_MAPPING_EXLOROM;
 	}
 
-	/* DSP revision quirks, restricted to exact normalized Pilotwings dumps.
-	   Target-Y follows the real DSP microcode in all three revisions below.
-	   USA/Japan shipped with the original DSP-1/1A op28 interpolation bug;
-	   the preserved European board uses the corrected DSP-1B behavior.
-	     266C44ED = Pilotwings (USA)
-	     77871727 = Pilotwings (Japan)
-	     DEF45776 = Pilotwings (Europe) */
-	if ((m_Flags & SNROM_FLAG_DSP1) && m_pRomData && m_uRomBytes)
-	{
-		Uint32 crc = _SNRomCRC32(m_pRomData, m_uRomBytes);
-		if (crc == 0x266C44EDu || crc == 0x77871727u ||
-		    crc == 0xDEF45776u)
-		{
-			m_Flags |= SNROM_FLAG_DSP1_TARGET_Y_SUBTRACT;
-			m_Flags |= SNROM_FLAG_PILOTWINGS_DYNAMIC_HVIRQ;
-		}
-
-		if (crc == 0x266C44EDu || crc == 0x77871727u)
-			m_Flags |= SNROM_FLAG_DSP1_ORIGINAL_OP28;
-	}
+	/* The CRC alone is not enough: require the cartridge header to have
+	 * classified the image as DSP-1 before enabling a DSP-1 revision quirk. */
+	if ((m_Flags & SNROM_FLAG_DSP1) && bOriginalDSP1Op28)
+		m_Flags |= SNROM_FLAG_DSP1_ORIGINAL_OP28;
 
 	m_bLoaded   = true;
 	return LOADERROR_NONE;
@@ -1070,7 +1508,6 @@ void SnesRom::Unload()
 	m_pCartInfo = NULL;
 	m_pRomData = NULL;
 	m_uRomBytes = 0;
-	m_Flags = SNROM_FLAG_ROM;
 	m_bLoaded   = false;
 	memset(m_Name, 0, sizeof(m_Name));
 }
@@ -1109,18 +1546,5 @@ char *SnesRom::GetExtName(Uint32 uExt)
 /* virtual */
 char   *SnesRom::GetMapperName()
 {
-	if (!m_pCartInfo)
-		return NULL;
-
-	switch (m_eMapping)
-	{
-	case SNROM_MAPPING_LOROM:
-		return (char *)"LoROM";
-	case SNROM_MAPPING_HIROM:
-		return (char *)"HiROM";
-	case SNROM_MAPPING_EXLOROM:
-		return (char *)"ExLoROM";
-	default:
-		return NULL;
-	}
+	return NULL;
 }

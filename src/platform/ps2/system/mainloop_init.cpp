@@ -38,6 +38,15 @@
 #include "audmixbuffer.h"
 #include "pathext.h"
 #include "snppucolor.h"
+#include "snppurender.h"
+#include "sega/picodrive/picodrive_bridge.h"
+/* AURORA_SNES9X2010_V5_ALLCORES_PERF_20260824 */
+#include "nes/quicknes/quicknes_bridge.h"
+/* AURORA_FCEUMM_FDS_PERF_DIRECT_T8_V3_20260827 */
+#include "nes/fceumm/fceumm_fds_bridge.h"
+#include "pce/beetle/pce_bridge.h"
+/* AURORA_SNES9X2010_V4_PS2_PERF_20260824 */
+#include "snes/snes9x2010/snes9x2010_bridge.h"
 #include "emumovie.h"
 
 #include <sifrpc.h>
@@ -135,7 +144,13 @@ extern "C" void DLog(const char *fmt, ...);
    gsKit has already reserved the active mode's FB0/FB1 when this helper
    runs, so the same layout remains valid for 480i and 1080i. */
 #define MAINLOOP_VRAM_FRAME_ALIGN   8192U
-#define MAINLOOP_OUT_TEX_BYTES      (256U * 256U * 4U)
+/* AURORA_PD_CT16_VRAM_FIX_20260821
+ * _OutTex remains first. The direct PicoDrive area must fit the LARGEST
+ * renderer, not only Fast/Good T8. Accurate is CT16; reserving only one byte
+ * per pixel let that upload run into the following font/UI allocation.
+ * 384x256x2 safely covers both CT16 and the smaller T8+CLUT layout. */
+#define MAINLOOP_OUT_TEX_BYTES      ((256U * 256U * 4U) + \
+                                     (384U * 256U * 2U) + 8192U)
 /* Highest blender address is base + 0x200 TBP (temporary 256px RGBA
    surface). Reserve through +0x280 TBP so the complete GS page span is
    private to the blender. */
@@ -156,6 +171,18 @@ static Bool _MainLoopAllocVideoVram(void)
 	Uint32 fontTBP;
 	Uint32 coverTBP;
 	Uint32 blenderTBP;
+
+    /* AURORA_GS_VRAM_EPOCH_V4_2
+     * GSK_Init/Reinit starts a new VRAM allocation epoch. Retire every
+     * renderer cache that stores GS addresses/residency from the old epoch.
+     * Cold boot is harmless: both invalidators are no-ops before first use. */
+    SNPPURenderInvalidateGsResources();
+    QuicknesBridge_InvalidateGsResources();
+    /* AURORA_FCEUMM_FDS_PERF_DIRECT_T8_V3_20260827: FDS direct T8 texture/CLUT live in this VRAM epoch too. */
+    FceummFdsBridge_InvalidateGsResources();
+    PicoDriveBridge_InvalidateGsResources();
+    PceBridge_InvalidateGsResources();
+    Snes9x2010Bridge_InvalidateGsResources();
 
 	outTBP = GSK_VramAllocTBP(
 		_MainLoopAlignVramBytes(MAINLOOP_OUT_TEX_BYTES));
@@ -188,6 +215,94 @@ static Bool _MainLoopAllocVideoVram(void)
 	       (unsigned)coverTBP, (unsigned)blenderTBP);
 	return TRUE;
 }
+
+/* AURORA_PD_NATIVE320_RASTER_SWITCH_V1
+ * SNES/NES/SMS/GG stay on 256x240. Plain MD can request 320x240 so an H40
+ * source sample maps to one physical framebuffer column in 240p. */
+Bool MainLoopEnsureGameplayRasterWidth(Int32 width)
+{
+        /* AURORA_PCE_ROOT512_KRAZY_LATCH_V12_20260830
+     * 512 is the fixed, GS-aligned storage raster used by PCE gameplay.
+     * Never silently collapse it to 256. */
+    if (width != 256 && width != 320 && width != 512)
+        width = 256;
+
+
+    /* AURORA_PCE_ACTIVEFB_RECONCILE_V14R2_20260830
+     * Não confundir largura solicitada com framebuffer já ativo.
+     * REQ512 + ACTIVE256 precisa obrigatoriamente reconstruir o GS. */
+    if (GSK_Get240pFramebufferWidth() == width)
+    {
+        if (g_GskVideoMode != GSK_VIDMODE_240P)
+            return TRUE;
+
+        if (GSK_GetActiveVideoMode() == GSK_VIDMODE_240P &&
+            GSK_GetActiveFramebufferWidth() == width)
+            return TRUE;
+    }
+
+    GSK_Set240pFramebufferWidth(width);
+
+    if (g_GskVideoMode != GSK_VIDMODE_240P)
+        return TRUE;
+
+    if (width == 256)
+        GSK_SetGameplayYOffsetBias(0);
+
+    GSK_ReinitVideo();
+
+    /* AURORA_PCE_ACTIVEFB_RECONCILE_V14R2_20260830 */
+    if (GSK_GetActiveVideoMode() != GSK_VIDMODE_240P ||
+        GSK_GetActiveFramebufferWidth() != width)
+    {
+        printf("[video] GS raster reconcile failed: requested=%d active=%d mode=%d\n",
+               (int)width,
+               (int)GSK_GetActiveFramebufferWidth(),
+               (int)GSK_GetActiveVideoMode());
+        return FALSE;
+    }
+
+    if (!_MainLoopAllocVideoVram())
+        return FALSE;
+
+    FontInit(s_FontTexTBP);
+    CoverInit(s_CoverTexTBP);
+
+    TextureSetAddr(&_OutTex, _MainLoop_uOutTexTBP);
+    if (_fbTexture[0])
+        TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+
+    return TRUE;
+}
+
+
+/* AURORA_PD_POLISH_V3_20260820_LIVE_VIDEO_MODE
+ * Reuse the same gsKit reinitialisation and VRAM epoch rebuild already used
+ * at boot and by the MD 256/320 raster switch. Called from the settings menu,
+ * so a 240p mode change deliberately starts on the UI's 256-wide raster. */
+Bool MainLoopReinitVideoMode(Int32 mode)
+{
+    g_GskVideoMode = mode;
+    GSK_SetNative240pPar(0);
+    GSK_SetGameplayYOffsetBias(0);
+    if (mode == GSK_VIDMODE_240P)
+        GSK_Set240pFramebufferWidth(256);
+
+    GSK_ReinitVideo();
+    if (!_MainLoopAllocVideoVram())
+        return FALSE;
+
+    FontInit(s_FontTexTBP);
+    CoverInit(s_CoverTexTBP);
+
+    if (_fbTexture[0])
+    {
+        TextureSetAddr(&_OutTex, _MainLoop_uOutTexTBP);
+        TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
+    }
+    return TRUE;
+}
+
 
 
 /* Browser starting directory. On real PS2 you typically want "mass:/"
@@ -291,10 +406,9 @@ Bool MainLoopInit()
 	ScrPrintf("%s",  pVersionInfo->CopyRight);
 #endif
 
-	/* Boot banner: original SNESticlePS2 title + iaddis copyright
-	   (replaces the #if 0 block above which depended on VersionGetInfo,
-	   itself wrapped in #if 0 inside version.cpp), followed by the
-	   ReyFxck fork credit. */
+	/* Boot banner: SNESticle Aurora identity, followed by explicit
+	   project lineage and thanks to SNESticle Revive maintainer ReyFxck
+	   and original SNESticle author Icer Addis. */
 	/* BUILD_DATE/BUILD_TIME vem do Makefile (TZ Brasilia, p/ nao ficar 3h
 	   adiantado como o __TIME__ em UTC).  APP_VERSION e' opt-in: so' e'
 	   definido se o build passar APP_VERSION=...; sem ele, o banner nao
@@ -306,35 +420,47 @@ Bool MainLoopInit()
 #define BUILD_TIME __TIME__
 #endif
 #ifdef APP_VERSION
-	ScrPrintf("SNESticle Revive v%s   %s  %s", APP_VERSION, BUILD_DATE, BUILD_TIME);
+	ScrPrintf("SNESticle Aurora v%s   %s  %s", APP_VERSION, BUILD_DATE, BUILD_TIME);
 #else
-	ScrPrintf("SNESticle Revive   %s  %s", BUILD_DATE, BUILD_TIME);
+	ScrPrintf("SNESticle Aurora   %s  %s", BUILD_DATE, BUILD_TIME);
 #endif
+	ScrPrintf("Aurora fork by itsveenee");
+	ScrPrintf("Based on SNESticle Revive by ReyFxck");
+	ScrPrintf("Thanks to ReyFxck for reviving SNESticle");
+	ScrPrintf("Original SNESticle by Icer Addis");
+	ScrPrintf("Thanks to Icer Addis for the original");
+	/* AURORA_ALL_CORE_SPLASH_V6_20260824 */
+	ScrPrintf("QuickNES: Shay Green / libretro contributors");
+	/* AURORA_FCEUMM_FDS_SPLASH_V1 */
+	ScrPrintf("FCEUmm FDS WIP: FCE Ultra / libretro");
+	ScrPrintf("PicoDrive: notaz / irixxxx / contributors");
+	ScrPrintf("Beetle PCE Fast: Mednafen / libretro contributors");
+	ScrPrintf("Snes9x 2010: Snes9x / libretro contributors");
+	ScrPrintf("Licenses/notices: repository LICENSES/");
 	ScrPrintf("Copyright (c) 1997-2004 Icer Addis");
-	ScrPrintf("Forked By ReyFxck - Thomas R. (2026)");
 
-	ScrPrintf("BootPath: %s", MainGetBootPath());
-	ScrPrintf("BootDir: %s", MainGetBootDir());
+	ScrPrintf("启动路径: %s", MainGetBootPath());
+	ScrPrintf("启动目录: %s", MainGetBootDir());
 
 	// set boot dir
-	strcpy(_MainLoop_BootDir, MainGetBootDir());
-
-	/* Keep the last mandatory embedded-module stack out of main()'s invisible
-	   OPL hand-off. Pad initialization below depends on this sio2man, so load
-	   sio2man/mcman/mcserv here after GS + the log screen are alive and before
-	   _MainLoopLoadModules(). If a VMC/BIOS-specific module start stalls, the
-	   real console now stops on this explicit marker instead of an inherited
-	   black/white loader background. */
-	BootMark("[IOP] memory card...");
+	/* AURORA_RUNTIME_SAFE_BOOTDIR_V1_4_2 */
 	{
-		int mcret = MemCardLoadEmbeddedIrx();
-		BOOTLOG("[boot] MemCardLoadEmbeddedIrx: done (ret=%d)", mcret);
-		(void)mcret;
+		const char *pBootDir = MainGetBootDir();
+		if (!pBootDir || strlen(pBootDir) >= sizeof(_MainLoop_BootDir))
+		{
+			_MainLoop_BootDir[0] = '\0';
+			ScrPrintf("[启动] 启动目录过长; 已禁用边车搜索");
+		}
+		else
+		{
+			snprintf(_MainLoop_BootDir, sizeof(_MainLoop_BootDir),
+			         "%s", pBootDir);
+		}
 	}
     _MainLoopLoadModules(_MainLoop_IOPModulePaths);
 
-    /* Video settings live on the memory card, whose stack came up immediately
-       before _MainLoopLoadModules. Load them now and apply: the display offset
+    /* Video settings live on the memory card, which only comes up inside
+       _MainLoopLoadModules.  Load them now and apply: the display offset
        is live (no realloc); a non-default video mode needs a one-shot GS
        re-init + font re-upload, since the first GSK_Init already ran at
        480i before the card was available.  Default (480i) users take the
@@ -347,6 +473,15 @@ Bool MainLoopInit()
     /* state.cfg can live on USB/MX4SIO/MMCE as well as a memory card. Load it
        only after the configured removable-storage backend is available. */
     MainLoopStateSettingsLoad();
+    /* AURORA_SNES9X2010_V6_CD_SRAM_NOTICES_20260824: mkdir -p the active SNESticle/SYSTEM tree after storage init. */
+    {
+        Char SystemDirectory[512];
+        if (MainLoopEnsureSystemDirectory(
+                SystemDirectory, (Int32)sizeof(SystemDirectory)))
+            ScrPrintf("SYSTEM 目录已就绪: %s", SystemDirectory);
+        else
+            ScrPrintf("SYSTEM 目录不可用（加载CD时将重试）");
+    }
     if (g_GskVideoMode != GSK_GetActiveVideoMode())
     {
         GSK_ReinitVideo();
@@ -427,10 +562,25 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 	_pSnes->Reset();
 
 	_pSnesRom = new SnesRom();
-	for (Uint32 iExt=0; iExt < _pSnesRom->GetNumExts(); iExt++)
-	{
-		PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, _pSnesRom->GetExtName(iExt));
-	}
+	/* AURORA_SNES9X2010_V1: second SNES implementation shares the browser
+	 * entry type. The runtime Core selector decides which wrapper receives
+	 * a selected SNES image. */
+	_pSnes9x2010 = new Snes9x2010System();
+	_pSnes9x2010->Reset();
+	_pSnes9x2010Rom = new Snes9x2010Rom();
+	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"sfc");
+	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"smc");
+	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"fig");
+	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"swc");
+	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"gd3");
+	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"gd7");
+	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"dx2");
+	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"bsx");
+	/* AURORA_SWC_FLOPPY_V1_20260831
+	 * AURORA_SWC_D88_ONLY_V5_20260901:
+	 * copier floppy media is D88-only; IMG/raw is intentionally retired. */
+	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESWCDISK, (char *)"d88");
+	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESWCBIOS, (char *)"rom"); /* AURORA_SWC_FLOPPY_V5_20260831 */
 
 	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESPALETTE, (char *)"snpal");
 
@@ -444,11 +594,41 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 	_pNes = new NesSystem();
 	_pNes->Reset();
 
+	/* AURORA_FCEUMM_FDS_V0_5_INIT: dedicated FDS system; .nes stays QuickNES. */
+	_pFds = new FdsSystem();
+	_pFds->Reset();
+
 	_pNesRom = new NesRom();
 	for (Uint32 iExt=0; iExt < _pNesRom->GetNumExts(); iExt++)
 	{
 		PathExtAdd(MAINLOOP_ENTRYTYPE_NESROM, _pNesRom->GetExtName(iExt));
 	}
+	/* AURORA_FCEUMM_FDS_V4_TURBO_PAL_PERF_20260827 */
+	PathExtAdd(MAINLOOP_ENTRYTYPE_NESPALETTE, (char *)"pal");
+
+	/* AURORA_PICODRIVE_STAGE2_INIT */
+	_pSega = new SegaSystem();
+	_pSega->Reset();
+	_pSegaRom = new SegaRom();
+	for (Uint32 iExt=0; iExt < _pSegaRom->GetNumExts(); iExt++)
+	{
+		PathExtAdd(MAINLOOP_ENTRYTYPE_SEGAROM, _pSegaRom->GetExtName(iExt));
+	}
+
+	/* AURORA_PCE_EXPERIMENTAL_V1 */
+	_pPce = new PceSystem();
+	_pPce->Reset();
+	_pPceRom = new PceRom();
+	for (Uint32 iExt=0; iExt < _pPceRom->GetNumExts(); iExt++)
+	{
+		PathExtAdd(MAINLOOP_ENTRYTYPE_PCEROM, _pPceRom->GetExtName(iExt));
+	}
+
+	/* AURORA_SNES9X2010_V6_CD_SRAM_NOTICES_20260824: CUE is classified by first-track signature at launch. */
+	PathExtAdd(MAINLOOP_ENTRYTYPE_CDIMAGE, (char *)"cue");
+	/* AURORA_PCE_CDRDAO_TOC_SUPPORT_V4_8_20260830
+	 * Beetle PCE Fast natively supports cdrdao TOC. */
+	PathExtAdd(MAINLOOP_ENTRYTYPE_CDIMAGE, (char *)"toc");
 
 	_pNesFDSDisk = new NesDisk();
 	for (Uint32 iExt=0; iExt < _pNesFDSDisk->GetNumExts(); iExt++)
@@ -462,17 +642,31 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 		PathExtAdd(MAINLOOP_ENTRYTYPE_NESFDSBIOS, _pNesFDSBios->GetExtName(iExt));
 	}
 
-	s_pMovieClip = new Emu::MovieClip(_pSnes->GetStateSize(), 60 * 60 * 60);
+	/* SNESTICLE_MOVIE_MAX_SYSTEM_STATE
+	 * MovieClip::RecordBegin changes m_uStateSize to the ACTIVE system and
+	 * asserts it is <= the constructor maximum. Allocate for whichever
+	 * core has the larger frontend state envelope instead of assuming SNES. */
+	{
+		Uint32 uMovieStateBytes = (Uint32)_pSnes->GetStateSize();
+		Uint32 uNesStateBytes   = (Uint32)_pNes->GetStateSize();
+		if (uNesStateBytes > uMovieStateBytes)
+			uMovieStateBytes = uNesStateBytes;
+		s_pMovieClip = new Emu::MovieClip(uMovieStateBytes, 60 * 60 * 60);
+	}
 
 	// init menu
-	_MainLoop_pBrowserScreen = new CBrowserScreen(6000);
+	/* AURORA_SNES9X2010_V6_2_STABLEINIT_20260824
+	 * Browser storage already grows geometrically. Reserving 6000 records at
+	 * boot held about 1.55 MiB even in a small directory; 256 keeps identical
+	 * capacity semantics while paying only for entries that actually exist. */
+	_MainLoop_pBrowserScreen = new CBrowserScreen(256);
 	_MainLoop_pBrowserScreen->SetMsgFunc(_MainLoopBrowserEvent);
 	_MainLoop_pBrowserScreen->SetDir(MENU_STARTDIR);
 
 	/* Separate, smaller browser for state-file maintenance.  Keeping it
 	   independent means opening State Manager never destroys the user's
 	   current ROM-browser directory or selection. */
-	_MainLoop_pStateBrowserScreen = new CBrowserScreen(1024);
+	_MainLoop_pStateBrowserScreen = new CBrowserScreen(64);
 	_MainLoop_pStateBrowserScreen->SetMsgFunc(_MainLoopStateBrowserEvent);
 	_MainLoop_pStateBrowserScreen->SetStateManager(TRUE);
 
@@ -482,7 +676,7 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 
 	_MainLoop_pStateScreen = new CMenuScreen();
 	_MainLoop_pStateScreen->SetMsgFunc(_MainLoopStateMenuEvent);
-	_MainLoop_pStateScreen->SetTitle("\xe5\x8d\xb3\xe6\x97\xb6\xe5\xad\x98\xe6\xa1\xa3");	/* 即时存档 */
+	_MainLoop_pStateScreen->SetTitle("Save Management");
 	_MainLoop_pStateScreen->SetTop(20);
 	_MainLoop_pStateScreen->SetEntries(_MainLoopStateMenuEntries);
 	_MainLoopStateMenuRefresh();
@@ -492,8 +686,13 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 	   target has been chosen yet. */
 	_MainLoop_pStateDeviceScreen = new CMenuScreen();
 	_MainLoop_pStateDeviceScreen->SetMsgFunc(_MainLoopStateDeviceMenuEvent);
-	_MainLoop_pStateDeviceScreen->SetTitle("\xe9\x80\x89\xe6\x8b\xa9\xe5\xad\x98\xe6\xa1\xa3\xe4\xbd\x8d\xe7\xbd\xae");	/* 选择存档位置 */
+	_MainLoop_pStateDeviceScreen->SetTitle("Save State Location");
 	_MainLoop_pStateDeviceScreen->SetTop(20);
+
+	_MainLoop_pStateConfirmScreen = new CMenuScreen();
+	_MainLoop_pStateConfirmScreen->SetMsgFunc(_MainLoopStateConfirmMenuEvent);
+	_MainLoop_pStateConfirmScreen->SetTop(40);
+	_MainLoop_pStateConfirmScreen->SetHorizontal(TRUE);
 
 	_MainLoop_pMemCardFormatScreen = new CMenuScreen();
 	_MainLoop_pMemCardFormatScreen->SetMsgFunc(
@@ -517,7 +716,24 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
         _MainLoopLoadSnesPalette("mc0:/SNESticle/default.snpal");
 	// load rom
         _MainLoopExecuteFile(_pRomFile, TRUE);
-        _bMenu = _pSystem ? FALSE : TRUE;
+
+        /* AURORA_FINAL_V1_4_BOOT_MENU_SESSION_20260901
+         * FINAL V1_3 made BGM/filesystem permission an explicit normal-menu
+         * lifetime owned by _MenuEnable(TRUE), rather than a sticky browser
+         * screen latch. The initial browser must therefore enter through the
+         * same owner. A successful autoboot remains gameplay and does not arm
+         * a menu session. */
+        if (_pSystem)
+        {
+            _bMenu = FALSE;
+        }
+        else
+        {
+            /* MainLoopInit set _bMenu FALSE immediately before autoboot, so
+             * this executes the full normal-menu entry path exactly once. */
+            _MenuEnable(TRUE);
+        }
+
         if (_MainLoop_bAudioReady)
         {
             /* Aud_Init already starts with a clean queue.  Stopping audsrv
@@ -550,3 +766,8 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 
     return TRUE;
 }
+
+
+/* AURORA_PCE_ACTIVEFB_RECONCILE_V14R2_20260830 */
+
+/* AURORA_PCE_CDRDAO_TOC_SUPPORT_V4_8_20260830 */

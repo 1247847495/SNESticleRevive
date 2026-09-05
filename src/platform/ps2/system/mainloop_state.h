@@ -2,6 +2,14 @@
 
 #include "types.h"
 
+enum MainLoopSramDeviceE
+{
+    MAINLOOP_SRAMDEVICE_AUTO,
+    MAINLOOP_SRAMDEVICE_USB,
+    MAINLOOP_SRAMDEVICE_MEMCARD,
+    MAINLOOP_SRAMDEVICE_NUM
+};
+
 enum MainLoopStateDeviceE
 {
 	MAINLOOP_STATEDEVICE_AUTO,
@@ -21,12 +29,30 @@ Bool _MainLoopSaveSRAM(Bool bSync);
 void _MainLoopLoadSRAM();
 Bool _MainLoopCheckSRAM();
 Bool _MainLoopForceCheckSRAM();
+
+/* AURORA_SWC_CART_SRAM_MEMORY_FINAL_V5_3_20260901 */
+void _MainLoopSwcCartSRAMAttach(const Char *pCartPath);
+void _MainLoopSwcCartSRAMDetach();
+
+void MainLoopSramSetDevice(MainLoopSramDeviceE eDevice);
+void MainLoopSramCycleDevice();
+MainLoopSramDeviceE MainLoopSramGetDevice();
+const Char *MainLoopSramGetDeviceName();
+const Char *MainLoopSramGetBrowseRoot();
+/* AURORA_SYSTEM_BIOS_PATH_FIX_V1_20260826: SYSTEM/firmware storage is independent from SRAM selection. */
+Bool MainLoopEnsureSystemDirectory(Char *pOut, Int32 nOutBytes);
+Bool MainLoopEnsureSwcDirectory(Char *pOut, Int32 nOutBytes); /* AURORA_SWC_MEGA_V9_20260831 */
+Bool MainLoopFindSystemFileDirectory(Char *pOut, Int32 nOutBytes,
+                                     const Char *pFileName);
+Bool MainLoopSramNeedsMemoryCardPreflight();
 Bool _MainLoopLoadState();
 Bool _MainLoopSaveState();
 
 void MainLoopStateSettingsLoad();
 Bool MainLoopStateSettingsSave();
 void MainLoopStateOnRomChanged();
+void MainLoopStatePrimeRomIdentityCRC(Uint32 uCRC);
+/* AURORA_PD_MEGA_FIX_20260820 */
 Bool MainLoopStateHasDeviceChoice();
 void MainLoopStateForgetDeviceChoice();
 void MainLoopStateSetDevice(MainLoopStateDeviceE eDevice);

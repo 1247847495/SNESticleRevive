@@ -10,8 +10,6 @@ class CNetworkScreen : public CScreen
     int m_iDigitIP;
     int m_iEditField;
     int m_iTextCursor;
-    int m_iKbPage;
-    int m_iKbCell;
     Int8 m_NetworkIP[12];
     Bool m_bLoaded;
     SmbConfigT m_Config;
@@ -25,7 +23,6 @@ class CNetworkScreen : public CScreen
     void InputIP(Uint32 trigger);
     void InputText(Uint32 trigger);
     void DrawIP(int x, int y);
-    void DrawKeyboard(int y);
     void BuildDisplayText(char *output, int outputSize, const char *text,
                           int password, int editing);
 

@@ -36,22 +36,24 @@ extern "C" {
 #include "netman_irx.h"
 #include "smap_irx.h"
 #include "ps2ip_irx.h"
+#include "ps2ips_irx.h"
 #include "smbman_irx.h"
 #include "cdfs_stream_irx.h"
 
 /* Stack BDM moderna fixada (FreeUsbd mini + FAT/exFAT/GPT). */
 #include "usbd_irx.h"
+#include "ps2mouse_irx.h"
 #include "bdm_irx.h"
 #include "bdmfs_fatfs_irx.h"
 #include "usbmass_bd_irx.h"
 #include "ps2atad_irx.h"
 #include "ps2hdd_irx.h"
+#include "atad_bd_irx.h"
 #ifdef HAVE_PS2FS
 #include "ps2fs_irx.h"
 #endif
 #include "mmceman_irx.h"
 #include "mx4sio_bd_irx.h"
-#include "usbhdfsd_irx.h"   /* ATA-Assault: ATA→BDM transport for internal HDD */
 
 /* Log visivel no splash de boot (real hardware) -- definido em audio_audsrv.c. */
 extern "C" void ScrPrintf(const char *pFormat, ...);
@@ -236,16 +238,6 @@ extern "C" int CdfsLoadEmbeddedIrx(void)
     return s_cdfs_loaded_result;
 }
 
-extern "C" int CdfsIsLoaded(void)
-{
-    return s_cdfs_loaded_result == 0;
-}
-
-extern "C" int CdfsGetLastError(void)
-{
-    return s_cdfs_loaded_result < 0 ? s_cdfs_loaded_result : 0;
-}
-
 /* Memory-card stack bring-up.
  *
  * Order matches ps2_drivers::init_memcard_driver(true) and every other
@@ -321,7 +313,15 @@ extern "C" int MemCardLoadEmbeddedIrx(void)
  * interno.  Cada passo loga via ScrPrintf, visivel no splash de boot --
  * se der b.o., a ultima linha na tela mostra qual modulo falhou. */
 static int s_usb_bdm_loaded_result = 1; /* 1 = not yet attempted */
+/* AURORA_USB_SNES_MOUSE_V1_5
+ * Mouse is optional: failure must never take mass:/ down with it. */
+static int s_usb_mouse_loaded_result = 1; /* 1=not tried, 0=ready, <0=failed */
 static int s_dev9_loaded_result = 1;    /* shared by HDD and network */
+
+extern "C" int UsbMouseDriverAvailable(void)
+{
+    return s_usb_mouse_loaded_result == 0;
+}
 
 static int Dev9LoadEmbeddedIrxOnce(void)
 {
@@ -339,31 +339,6 @@ static int Dev9LoadEmbeddedIrxOnce(void)
 
     s_dev9_loaded_result = 0;
     return s_dev9_loaded_result;
-}
-
-/* ps2atad e' compartilhado pelas duas pilhas ATA (APA hdd0: e o transport
-   BDM do ATA-Assault).  O modulo importa dev9 e inicializa o controlador
-   ATA; carrega-lo duas vezes na mesma sessao re-inicializaria o barramento
-   com um driver residente do outro lado, entao usamos um guard unico. */
-static int s_atad_loaded_result = 1;    /* 1 = not yet attempted */
-
-static int AtadLoadEmbeddedIrxOnce(void)
-{
-    int ret;
-
-    if (s_atad_loaded_result != 1)
-        return s_atad_loaded_result;
-
-    ret = EmbeddedIrxLoad(ps2atad_irx, sizeof(ps2atad_irx), 0, NULL);
-    printf("Atad: %d\n", ret);
-    if (ret < 0)
-    {
-        s_atad_loaded_result = ret;
-        return s_atad_loaded_result;
-    }
-
-    s_atad_loaded_result = 0;
-    return s_atad_loaded_result;
 }
 
 extern "C" int UsbBdmLoadEmbeddedIrx(void)
@@ -400,6 +375,21 @@ extern "C" int UsbBdmLoadEmbeddedIrx(void)
         return s_usb_bdm_loaded_result;
     }
 
+    /* PS2SDK's HID boot-mouse driver attaches to the already-live
+       usbd_mini bus. This is deliberately best-effort: an unusual HID or
+       an import mismatch must not break USB mass storage. */
+    ret = EmbeddedIrxLoad(ps2mouse_irx, sizeof(ps2mouse_irx), 0, NULL);
+    BootImport("ps2mouse", ret);
+    if (ret < 0)
+    {
+        printf("UsbMouse: ps2mouse.irx unavailable (%d) -- continuing without mouse\n", ret);
+        s_usb_mouse_loaded_result = ret;
+    }
+    else
+    {
+        s_usb_mouse_loaded_result = 0;
+    }
+
     ret = EmbeddedIrxLoad(usbmass_bd_irx, sizeof(usbmass_bd_irx), 0, NULL);
     BootImport("usbmass_bd", ret);
     if (ret < 0)
@@ -434,16 +424,6 @@ extern "C" int UsbBdmLoadEmbeddedIrx(void)
     return s_usb_bdm_loaded_result;
 }
 
-extern "C" int UsbBdmIsLoaded(void)
-{
-    return s_usb_bdm_loaded_result == 0;
-}
-
-extern "C" int UsbBdmGetLastError(void)
-{
-    return s_usb_bdm_loaded_result < 0 ? s_usb_bdm_loaded_result : 0;
-}
-
 /* HD INTERNO (APA) -- carga PREGUICOSA e opcional.
  *
  * Por que separado do UsbBdm: a init do ps2dev9/ps2hdd e' SINCRONA e,
@@ -457,22 +437,41 @@ static int s_hdd_enabled = 0;   /* toggle (persistido no video.cfg) */
 static int s_hdd_loaded  = 0;   /* modulos ja carregados nesta sessao */
 static char s_hdd_mounted[128] = { 0 };
 
-/* ATA BDM ASSAULT (HD interno FAT/exFAT via BDM massN:).
-   Toggle padrao OFF (igual APA: evita wait DEV9 sincrono em consoles sem HD).
-   s_atabd_loaded: 0 = nao carregado, 1 = carregado com sucesso, <0 = falhou.
-   MUTUAMENTE EXCLUSIVO com o modo APA acima: ambos sao donos do ATA. */
-static int s_atabd_enabled    = 0;
-static int s_atabd_loaded     = 0;   /* 0=no, 1=yes, <0=last error cached  */
-static int s_atabd_last_error = 0;
+/* HD INTERNO (exFAT/FAT via BDM) -- carga PREGUICOSA e opcional, MUTUAMENTE
+ * EXCLUSIVA com o modo APA acima: ps2atad e atad_bd registram a mesma
+ * library "atad" 1.3, entao apenas um deles pode residir no IOP por sessao.
+ * A pilha e' dev9 -> atad_bd; o BDM e o bdmfs_fatfs (UTF-8 LFN) ja' sobem
+ * no boot, entao o disco FAT/exFAT aparece como ata0:/ata1: logo apos a
+ * carga. Disco inteiro sem tabela de particoes (superfloppy) tambem e'
+ * montado: o bdmfs_fatfs tenta o boot sector direto quando MBR/GPT falham. */
+static int s_ata_bd_enabled    = 0;  /* toggle (persistido no video.cfg) */
+static int s_ata_bd_loaded     = 0;  /* atad_bd ja carregado nesta sessao */
+static int s_ata_bd_last_error = 0;
 
 extern "C" int HddSupportIsEnabled(void)
 {
     return s_hdd_enabled;
 }
 
+extern "C" int HddNeedsRestart(void)
+{
+    /* O modo exFAT (atad_bd) ja carregou a library atad nesta sessao:
+       trocar para APA so' entra em vigor apos reiniciar. */
+    return (s_hdd_enabled && s_ata_bd_loaded) ? 1 : 0;
+}
+
 extern "C" void HddSupportSetEnabled(int enabled)
 {
     s_hdd_enabled = enabled ? 1 : 0;
+
+    /* O HD interno tem dois modos MUTUAMENTE EXCLUSIVOS: APA (hdd0:, via
+       ps2atad+ps2hdd+ps2fs) ou exFAT/FAT (ata0:, via atad_bd+BDM).  Ambos
+       registram a library "atad" 1.3 no IOP, entao so' um pode carregar
+       por sessao.  Ligar um desliga o outro (mesmo padrao do toggle
+       MMCE/MX4SIO: o recem-escolhido vence; modulo ja' residente nao e'
+       descarregado, o AtaBdNeedsRestart/HddNeedsRestart avisa). */
+    if (s_hdd_enabled)
+        s_ata_bd_enabled = 0;
 }
 
 extern "C" int HddLoadEmbeddedIrx(void)
@@ -482,14 +481,11 @@ extern "C" int HddLoadEmbeddedIrx(void)
     if (!s_hdd_enabled) return -1;   /* desligado: nem tenta */
     if (s_hdd_loaded)   return 0;    /* ja carregado: no-op */
 
-    /* MUTUA EXCLUSAO: ATA BDM Assault tambem inicializa o hardware ATA
-       via modulo usbhdfsd.irx e nao divide o barramento.  Se ele ja
-       subiu, recusa carregar a pilha APA (usuario precisa reiniciar
-       e escolher um dos dois modos). */
-    if (s_atabd_loaded == 1)
+    if (s_ata_bd_loaded)
     {
-        printf("HddLoad: ATA BDM Assault is resident; APA skipped (needs reboot)\n");
-        return -10;
+        /* O atad_bd (modo exFAT) ja registrou a library atad nesta sessao;
+           a pilha APA precisa de um IOP limpo.  Reinicie para trocar de modo. */
+        return EMBEDDED_IRX_ERROR_RESTART_REQUIRED;
     }
 
     /* dev9 -> ps2atad -> ps2hdd (expoe hdd0: no formato APA) -> ps2fs (PFS,
@@ -507,7 +503,7 @@ extern "C" int HddLoadEmbeddedIrx(void)
     printf("HddLoad: dev9 = %d\n", ret);
     if (ret < 0) return -1;
 
-    ret = AtadLoadEmbeddedIrxOnce();
+    ret = EmbeddedIrxLoad(ps2atad_irx, sizeof(ps2atad_irx), 0, NULL);
     printf("HddLoad: atad = %d\n", ret);
     if (ret < 0) return -2;
 
@@ -576,96 +572,69 @@ extern "C" int HddMapPath(const char *uiPath, char *out, int outsz)
     return 1;
 }
 
-/* ------------------------------------------------------------------ */
-/* ATA BDM Assault: internal HDD as massN: with FAT/exFAT/MBR/GPT     */
-/* ------------------------------------------------------------------ */
+/* ---- HD interno (exFAT/FAT via BDM): atad_bd ---- */
 
-extern "C" int AtaBdmAssaultIsEnabled(void)
+extern "C" int AtaBdSupportIsEnabled(void)
 {
-    return s_atabd_enabled;
+    return s_ata_bd_enabled;
 }
 
-extern "C" void AtaBdmAssaultSetEnabled(int enabled)
+extern "C" void AtaBdSupportSetEnabled(int enabled)
 {
-    s_atabd_enabled = enabled ? 1 : 0;
+    s_ata_bd_enabled = enabled ? 1 : 0;
+
+    /* Mutua exclusao com o modo APA (hdd0:) -- ver comentario do bloco
+       HddSupportSetEnabled acima. */
+    if (s_ata_bd_enabled)
+        s_hdd_enabled = 0;
 }
 
-extern "C" int AtaBdmAssaultIsLoaded(void)
+extern "C" int AtaBdNeedsRestart(void)
 {
-    return s_atabd_loaded == 1;
+    /* O modo oposto ja carregou seus modulos ATAD nesta sessao: trocar
+       de modo so' entra em vigor apos reiniciar. */
+    return (s_ata_bd_enabled && s_hdd_loaded) ? 1 : 0;
 }
 
-extern "C" int AtaBdmAssaultGetLastError(void)
+extern "C" int AtaBdIsLoaded(void)
 {
-    return s_atabd_last_error;
+    return s_ata_bd_loaded;
 }
 
-/* Carrega (preguicosamente) o transport ATA do ATA-Assault para ligar o(s)
- * HD(s) interno(s) ao BDM ja' rodando (bdm + bdmfs_fatfs).  Nao inicia a
- * BDM em si; o chamador deve ter trazido a BDM antes (USB ou MX4SIO).
- * Retorna 0 em sucesso; <0 em erro.  Idempotente. */
-extern "C" int AtaBdmAssaultLoadEmbeddedIrx(void)
+extern "C" int AtaBdGetLastError(void)
+{
+    return s_ata_bd_last_error;
+}
+
+extern "C" int AtaBdLoadEmbeddedIrx(void)
 {
     int ret;
 
-    if (!s_atabd_enabled)
-    {
-        s_atabd_last_error = -1;
-        return -1;
-    }
-    if (s_atabd_loaded == 1)
-        return 0;
+    if (!s_ata_bd_enabled) return -1;   /* desligado: nem tenta */
+    if (s_ata_bd_loaded)   return 0;    /* ja carregado: no-op */
 
-    /* Mutua exclusao: a pilha APA (hdd0:) do ps2atad + ps2hdd tambem e'
-       dona do hardware ATA.  Se ela ja foi carregada nesta sessao,
-       recusa: usuario tem que reiniciar e escolher um unico modo. */
-    if (s_hdd_loaded == 1)
+    if (s_hdd_loaded)
     {
-        printf("AtaBdm: APA ps2atad is resident; ATA-Assault skipped (reboot)\n");
-        s_atabd_last_error = EMBEDDED_IRX_ERROR_RESTART_REQUIRED;
-        return s_atabd_last_error;
+        /* A pilha APA (ps2atad) ja registrou a library atad; carregar o
+           atad_bd agora falharia com library duplicada. */
+        s_ata_bd_last_error = EMBEDDED_IRX_ERROR_RESTART_REQUIRED;
+        return s_ata_bd_last_error;
     }
 
-    /* Observacao: a BDM ja' deve estar rodando (via UsbBdmLoadEmbeddedIrx
-       ou MX4SIO, ambos chamados antes no browser).  Nao subimos a BDM
-       aqui: o transport ATA apenas se registra no BDM core existente.
-       Se por acaso a BDM ainda nao subiu (caso de erro do chamador),
-       EmbeddedIrxLoad(usbhdfsd.irx) abaixo vai reportar um erro normal
-       (nao ha' como registrar um block-device em um core inexistente). */
+    /* dev9 e' o barramento do ATAD (mesma dependencia da pilha APA e da
+       rede); duplicado ja' carregado e' ignorado pelo Dev9LoadEmbeddedIrxOnce. */
+    ret = Dev9LoadEmbeddedIrxOnce();
+    printf("AtaBdLoad: dev9 = %d\n", ret);
+    if (ret < 0) { s_ata_bd_last_error = -1; return -1; }
 
-    /* usbhdfsd.irx EMBUTE o driver dev9 E o driver atad completos: a tabela
-       de EXPORT do binario contem "dev9" e "atad", e os unicos imports de
-       terceiros sao os modulos do nucleo (loadcore/thbase/.../thsemap) mais
-       "bdm".  Carregar ps2dev9 ou ps2atad antes faz a init interna falhar
-       ("USBHDFSD: DEV9 init failed") porque o hardware ATA ja' foi
-       reivindicado -- era exatamente o bug do erro -30001 (o modulo inicia,
-       _start roda e recusa ficar residente).
+    /* atad_bd (ATAD+BDM): conecta o HD como block device "ata" no BDM ja'
+       residente; o bdmfs_fatfs (boot) monta FAT/exFAT em ata0:/ata1:. */
+    ret = EmbeddedIrxLoad(atad_bd_irx, sizeof(atad_bd_irx), 0, NULL);
+    printf("AtaBdLoad: atad_bd = %d\n", ret);
+    if (ret < 0) { s_ata_bd_last_error = -2; return -2; }
 
-       Unico conflito restante: se a pilha de rede (SMB) ja' subiu o
-       ps2dev9 nesta sessao, o dev9 embutido nao consegue o hardware.
-       Detectamos o caso e pedimos reboot em vez de falhar em silencio. */
-    if (s_dev9_loaded_result == 0)
-    {
-        printf("AtaBdm: ps2dev9 resident (network); ATA-Assault needs reboot\n");
-        s_atabd_last_error = EMBEDDED_IRX_ERROR_RESTART_REQUIRED;
-        return s_atabd_last_error;
-    }
-
-    /* usbhdfsd.irx: modulo do ATA-Assault que inicializa o controlador
-       ATA interno e registra cada disco encontrado como um block-device
-       na BDM (mass0, mass1, ...) -- igual ao USB mass storage, mas no
-       barramento IDE.  FatFs monta as particoes automaticamente. */
-    ret = EmbeddedIrxLoad(usbhdfsd_irx, sizeof(usbhdfsd_irx), 0, NULL);
-    printf("AtaBdm: usbhdfsd = %d\n", ret);
-    if (ret < 0)
-    {
-        s_atabd_last_error = ret;
-        s_atabd_loaded     = ret;
-        return ret;
-    }
-
-    s_atabd_loaded     = 1;
-    s_atabd_last_error = 0;
+    s_ata_bd_loaded = 1;
+    s_ata_bd_last_error = 0;
     return 0;
 }
 
@@ -815,12 +784,11 @@ extern "C" int MmceNeedsRestart(void)
 /* ------------------------------------------------------------------------
  * Toggles de dispositivos SEM modulo proprio de carga preguicosa:
  *
- *  - Mass (USB): a stack USB (usbd_mini/bdm/bdmfs_fatfs/usbmass_bd) sobe
- *    SOB DEMANDA quando o usuario abre massN:.  Tirar SifExecModuleBuffer do
- *    boot invisivel impede que uma espera especifica de hardware deixe o ELF
- *    preso na tela preta/branca herdada do OPL.  Este flag controla a
- *    LISTAGEM de mass0:/mass1: no browser e a carga do mx4sio (abaixo).
- *    Padrao LIGADO.
+ *  - Mass (USB): a stack USB (usbd_mini/bdm/bdmfs_fatfs/usbmass_bd) SEMPRE sobe
+ *    no boot -- e' o armazenamento principal e seguro, e gatear isso no
+ *    boot mexeria no caminho critico que causava a tela preta.  Este flag
+ *    so' controla a LISTAGEM de mass0:/mass1: no browser e a carga do
+ *    mx4sio (abaixo).  Padrao LIGADO.
  *  - SMB (smb:): compartilhamento de rede para ROMs. O toggle controla a
  *    listagem; a rede, o smbman e a autenticacao so' sobem quando o usuario
  *    abre smb:. Padrao DESLIGADO.
@@ -943,7 +911,8 @@ extern "C" int NetIfLoadEmbeddedIrx(void)
 {
     int ret;
 
-    if (s_netif_loaded_result != 1) return s_netif_loaded_result;
+    if (s_netif_loaded_result != 1)
+        return s_netif_loaded_result;
 
     ret = Dev9LoadEmbeddedIrxOnce();
     if (ret < 0)
@@ -961,6 +930,11 @@ extern "C" int NetIfLoadEmbeddedIrx(void)
         return s_netif_loaded_result;
     }
 
+    /* AURORA_SMB_IOP_STACK_V3_20260827
+     * SMBMAN runs on the IOP and imports lwip_socket/lwip_connect/etc from
+     * the IOP-side ps2ip module. Match OPL's architecture:
+     * DEV9 -> NETMAN -> NetManInit -> SMAP -> ps2ip-nm -> ps2ips.
+     */
     ret = NetManInit();
     if (ret < 0)
     {
@@ -980,8 +954,16 @@ extern "C" int NetIfLoadEmbeddedIrx(void)
     ret = EmbeddedIrxLoad(ps2ip_irx, sizeof(ps2ip_irx), 0, NULL);
     if (ret < 0)
     {
-        printf("NetIfLoadEmbeddedIrx: ps2ip.irx failed (%d)\n", ret);
+        printf("NetIfLoadEmbeddedIrx: ps2ip-nm.irx failed (%d)\n", ret);
         s_netif_loaded_result = -5;
+        return s_netif_loaded_result;
+    }
+
+    ret = EmbeddedIrxLoad(ps2ips_irx, sizeof(ps2ips_irx), 0, NULL);
+    if (ret < 0)
+    {
+        printf("NetIfLoadEmbeddedIrx: ps2ips.irx failed (%d)\n", ret);
+        s_netif_loaded_result = -6;
         return s_netif_loaded_result;
     }
 
@@ -1088,9 +1070,12 @@ extern "C" void EmbeddedIrxResetRuntimeState(void)
     s_memcard_loaded = 0;
     s_cdfs_loaded_result = 1;
     s_usb_bdm_loaded_result = 1;
+    s_usb_mouse_loaded_result = 1;
     s_dev9_loaded_result = 1;
     s_hdd_loaded = 0;
     s_hdd_mounted[0] = 0;
+    s_ata_bd_loaded = 0;
+    s_ata_bd_last_error = 0;
 
     s_mmce_loaded = 0;
     s_mmce_slot_mask = -1;

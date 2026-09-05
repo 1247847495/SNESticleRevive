@@ -13,9 +13,18 @@
 #include "mainloop_debug.h"
 #include "mainloop_shared.h"
 #include "mainloop_ui.h"
+#include "mainloop_menu.h" /* AURORA_FINAL_V1_5_RENDER_MENU_API_INCLUDE_20260901 */
 #include "mainloop_bgm.h"
-#include "mainloop_safe_frameskip.h"
+#include "mainloop_safe_frameskip.h" /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
+#include "sega/picodrive/picodrive_bridge.h"
+/* AURORA_SNES9X2010_V5_ALLCORES_PERF_20260824 */
+#include "nes/quicknes/quicknes_bridge.h"
+/* AURORA_FCEUMM_FDS_PERF_DIRECT_T8_V3_20260827 */
+#include "nes/fceumm/fceumm_fds_bridge.h"
+#include "pce/beetle/pce_bridge.h"
 
+/* AURORA_SNES9X2010_V4_PS2_PERF_20260824 */
+#include "snes/snes9x2010/snes9x2010_bridge.h"
 #include "types.h"
 #include "console.h"
 #include "snes.h"
@@ -28,6 +37,13 @@
 #include "snppublend_gs.h"
 #include "common/debug/dbgterm.h"
 
+/* AURORA_PCE_RELEASE_CLEANUP_FINAL_V15_20260830
+ * Hidden release diagnostics. Keep the probes available for future
+ * PCE/QuickNES investigations without drawing anything by default. */
+#ifndef AURORA_RUNTIME_DIAG_OVERLAY
+#define AURORA_RUNTIME_DIAG_OVERLAY 0
+#endif
+
 #include "mainloop_iop.h"
 
 extern "C" {
@@ -36,6 +52,7 @@ extern "C" {
 #include "gpfifo.h"
 #include "gpprim.h"
 #include "gskit_backend.h"
+#include "audio.h"
 };
 
 extern "C" {
@@ -53,61 +70,416 @@ extern "C" {
 
 static Uint32 _uVblankCycle;
 
-static MainLoopSafeFrameskipScheduler _SafeFrameskip;
-static Bool _bSafeFrameskipEnabled = FALSE;
+/* AURORA_SAFE_FRAMESKIP_PICODRIVE_AUTO_V1
+ * Global adaptation of standalone PicoDrive's Auto Frameskip scheduler.
+ *
+ * Standalone PicoDrive keeps an ideal timestamp (timestamp_aim), compares it
+ * with the current clock before each frame, skips video when it is more than
+ * one target frame late, permits up to max_skip consecutive skips (default 4),
+ * and trims timing debt beyond roughly three frames.
+ *
+ * Aurora's host loop is a presentation loop, so its target_frametime is the
+ * calibrated GS VBlank period. The decision is made once per host tick and is
+ * then shared by every core. A skipped tick still executes core CPU/audio but
+ * MainLoopRender consumes the one-shot below and does not present or wait for
+ * VBlank, which is what makes real catch-up possible.
+ *
+ * Menu value: 0=Off, 1..9=max_skip. Aurora default=1.
+ * AURORA_FAMICOM_MIC_CFG41_20260828
+ */
+static Int32  s_SafeFrameskipLevel = 1;
+static Bool   s_SafeFrameskipSkipPresentation = FALSE;
+static Uint32 s_SafeFrameskipAim = 0;
+static Uint32 s_SafeFrameskipConsecutive = 0;
+static Uint32 s_SafeFrameskipLastFlip = 0;
+static Uint32 s_SafeFrameskipPeriod = 0;
+static Uint32 s_SafeFrameskipSamples[3] = { 0, 0, 0 };
+static Uint32 s_SafeFrameskipSampleCount = 0;
+static Uint32 s_SafeFrameskipSamplePos = 0;
+/* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
+ * One-shot request raised only by a CDDA cache/hunk miss. */
+static Bool s_SafeFrameskipCdAudioWindowRequested = FALSE;
 
-Bool MainLoopSafeFrameskipIsEnabled()
+static Uint32 _MainLoopSafeFrameskipMedian3(Uint32 a, Uint32 b, Uint32 c)
 {
-#if SNESTICLE_SAFE_FRAMESKIP
-	return _bSafeFrameskipEnabled;
-#else
-	return FALSE;
-#endif
+    if (a > b) { const Uint32 x = a; a = b; b = x; }
+    if (b > c) { const Uint32 x = b; b = c; c = x; }
+    if (a > b) { const Uint32 x = a; a = b; b = x; }
+    return b;
 }
 
-void MainLoopSafeFrameskipSetEnabled(Bool bEnabled)
+static void _MainLoopSafeFrameskipResetTiming(void)
 {
-#if SNESTICLE_SAFE_FRAMESKIP
-	Bool bNewValue = bEnabled ? TRUE : FALSE;
-	if (_bSafeFrameskipEnabled != bNewValue)
-	{
-		_bSafeFrameskipEnabled = bNewValue;
-		_SafeFrameskip.Reset();
-	}
-#else
-	(void)bEnabled;
-	_bSafeFrameskipEnabled = FALSE;
-#endif
+    s_SafeFrameskipAim = 0;
+    s_SafeFrameskipConsecutive = 0;
+    s_SafeFrameskipSkipPresentation = FALSE;
 }
 
-Uint32 MainLoopSafeFrameskipTake(Bool bAllowed)
+static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
 {
-#if SNESTICLE_SAFE_FRAMESKIP
-	if (_bSafeFrameskipEnabled && bAllowed)
-		return _SafeFrameskip.TakeCatchupFrames();
-#else
-	(void)bAllowed;
-#endif
-	_SafeFrameskip.CancelRecovery();
-	return 0;
+    if (delta == 0)
+        return;
+
+    if (s_SafeFrameskipPeriod != 0)
+    {
+        if (gameplay)
+        {
+            /* Only a healthy single-VBlank presentation may refine timing. */
+            if ((Uint64)delta * 4u < (Uint64)s_SafeFrameskipPeriod * 3u ||
+                (Uint64)delta * 4u > (Uint64)s_SafeFrameskipPeriod * 5u)
+                return;
+        }
+        else
+        {
+            /* Menu can teach PAL/NTSC drift while rejecting half/double noise. */
+            if ((Uint64)delta * 3u < (Uint64)s_SafeFrameskipPeriod * 2u ||
+                (Uint64)delta * 2u > (Uint64)s_SafeFrameskipPeriod * 3u)
+                return;
+        }
+    }
+
+    s_SafeFrameskipSamples[s_SafeFrameskipSamplePos] = delta;
+    s_SafeFrameskipSamplePos = (s_SafeFrameskipSamplePos + 1u) % 3u;
+    if (s_SafeFrameskipSampleCount < 3u)
+        ++s_SafeFrameskipSampleCount;
+
+    if (s_SafeFrameskipSampleCount == 1u)
+        s_SafeFrameskipPeriod = s_SafeFrameskipSamples[0];
+    else if (s_SafeFrameskipSampleCount == 2u)
+        s_SafeFrameskipPeriod = (Uint32)(
+            ((Uint64)s_SafeFrameskipSamples[0] +
+             (Uint64)s_SafeFrameskipSamples[1]) / 2u);
+    else
+        s_SafeFrameskipPeriod = _MainLoopSafeFrameskipMedian3(
+            s_SafeFrameskipSamples[0],
+            s_SafeFrameskipSamples[1],
+            s_SafeFrameskipSamples[2]);
 }
 
-void MainLoopSafeFrameskipAfterFlip()
+Int32 MainLoopSafeFrameskipGetLevel(void)
 {
-#if SNESTICLE_SAFE_FRAMESKIP
-	if (!_bSafeFrameskipEnabled)
-		return;
+    return s_SafeFrameskipLevel;
+}
 
-	Bool bSnesGameplay = (!_bMenu && _pSystem == _pSnes &&
-	                      !_MainLoop_BlackScreen) ? TRUE : FALSE;
-	_SafeFrameskip.AfterFlip(ProfCtrGetCycle(), bSnesGameplay);
-#endif
+void MainLoopSafeFrameskipSetLevel(Int32 level)
+{
+    if (level < 0) level = 0;
+    if (level > 9) level = 9;
+    s_SafeFrameskipLevel = level;
+    /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
+    s_SafeFrameskipCdAudioWindowRequested = FALSE;
+    _MainLoopSafeFrameskipResetTiming();
+}
+
+Bool MainLoopSafeFrameskipGetEnabled(void)
+{
+    return s_SafeFrameskipLevel > 0 ? TRUE : FALSE;
+}
+
+void MainLoopSafeFrameskipSetEnabled(Bool enabled)
+{
+    if (!enabled)
+        MainLoopSafeFrameskipSetLevel(0);
+    else if (s_SafeFrameskipLevel <= 0)
+        MainLoopSafeFrameskipSetLevel(1);
+}
+
+/* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
+ *
+ * A CDDA miss is forbidden from synchronously touching storage on a frame
+ * that is going to be presented. The core returns silence for that span and
+ * asks for one Safe Frameskip window on the next host tick.
+ */
+void MainLoopSafeFrameskipRequestCdAudioWindow(void)
+{
+    if (s_SafeFrameskipLevel > 0)
+        s_SafeFrameskipCdAudioWindowRequested = TRUE;
+}
+
+/* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
+void MainLoopSafeFrameskipCancelCdAudioWindow(void)
+{
+    s_SafeFrameskipCdAudioWindowRequested = FALSE;
+}
+
+Bool MainLoopSafeFrameskipTake(Bool allowed)
+{
+    Uint32 now;
+    Int32 diff;
+    const Int32 target = (Int32)s_SafeFrameskipPeriod;
+    Bool skip = FALSE;
+
+    /* Exactly one presentation one-shot is produced by each host decision. */
+    s_SafeFrameskipSkipPresentation = FALSE;
+
+    /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
+     * The presented frame that discovered the miss stays untouched.
+     * This NEXT tick is the only place where blocking CDDA refill may run. */
+    if (!allowed || s_SafeFrameskipLevel <= 0)
+    {
+        s_SafeFrameskipCdAudioWindowRequested = FALSE;
+        _MainLoopSafeFrameskipResetTiming();
+        return FALSE;
+    }
+
+    if (s_SafeFrameskipCdAudioWindowRequested)
+    {
+        s_SafeFrameskipCdAudioWindowRequested = FALSE;
+
+        /* AURORA_EXTREME_CD_VIDEO_FIRST_V2_20260830
+         * CDDA may spend Safe Frameskip, but never bypass max_skip. */
+        if (s_SafeFrameskipConsecutive >=
+            (Uint32)s_SafeFrameskipLevel)
+        {
+            s_SafeFrameskipConsecutive = 0;
+
+            if (s_SafeFrameskipSampleCount >= 3u && target > 0)
+            {
+                now = ProfCtrGetCycle();
+                s_SafeFrameskipAim = now + s_SafeFrameskipPeriod;
+            }
+            else
+            {
+                s_SafeFrameskipAim = 0;
+            }
+
+            return FALSE;
+        }
+
+        if (s_SafeFrameskipSampleCount >= 3u && target > 0)
+        {
+            now = ProfCtrGetCycle();
+            if (s_SafeFrameskipAim == 0)
+                s_SafeFrameskipAim = now;
+
+            ++s_SafeFrameskipConsecutive;
+            s_SafeFrameskipAim += s_SafeFrameskipPeriod;
+        }
+        else
+        {
+            ++s_SafeFrameskipConsecutive;
+        }
+
+        s_SafeFrameskipSkipPresentation = TRUE;
+        return TRUE;
+    }
+
+    if (s_SafeFrameskipSampleCount < 3u || target <= 0)
+    {
+        _MainLoopSafeFrameskipResetTiming();
+        return FALSE;
+    }
+
+    now = ProfCtrGetCycle();
+
+    /* PicoDrive reset_timing equivalent. First eligible tick establishes aim. */
+    if (s_SafeFrameskipAim == 0)
+    {
+        s_SafeFrameskipAim = now;
+        s_SafeFrameskipConsecutive = 0;
+    }
+
+    /* PicoDrive: diff = timestamp_aim - timestamp. Uint32 subtraction then
+     * Int32 interpretation intentionally preserves short counter wraparound. */
+    diff = (Int32)(s_SafeFrameskipAim - now);
+
+    /* PicoDrive Auto: if more than one target frame late, discard video,
+     * limited by max_skip. Here the menu level IS max_skip. */
+    if (diff < -target)
+    {
+        if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)
+        {
+            ++s_SafeFrameskipConsecutive;
+            skip = TRUE;
+        }
+        else
+        {
+            /* AURORA_CD_AUDIO_STREAM_V2_FRAMESKIP_REBASE_20260829
+             *
+             * We have already spent max_skip consecutive catch-up frames and
+             * are forcing a presentation now. Do not preserve stale host debt
+             * from an old I/O stall into the next burst: re-anchor to `now`.
+             * Persistent real overload can still trigger a new skip later,
+             * but a one-off CD read spike cannot leave Auto apparently stuck. */
+            s_SafeFrameskipConsecutive = 0;
+            s_SafeFrameskipAim = now;
+            diff = 0;
+        }
+    }
+    else
+    {
+        s_SafeFrameskipConsecutive = 0;
+    }
+
+    /* PicoDrive: don't go in debt too much. Keep the ideal clock no more than
+     * roughly three target frames behind before advancing this frame's aim. */
+    while (diff < -(target * 3))
+    {
+        s_SafeFrameskipAim += s_SafeFrameskipPeriod;
+        diff = (Int32)(s_SafeFrameskipAim - now);
+    }
+
+    /* PicoDrive advances timestamp_aim once for every emulated host tick,
+     * whether that tick is shown or skipped. */
+    s_SafeFrameskipAim += s_SafeFrameskipPeriod;
+    s_SafeFrameskipSkipPresentation = skip;
+    return skip;
+}
+
+Bool MainLoopSafeFrameskipConsumePresentationSkip(void)
+{
+    const Bool skip = s_SafeFrameskipSkipPresentation;
+    s_SafeFrameskipSkipPresentation = FALSE;
+    return skip;
+}
+
+static void _MainLoopSafeFrameskipAfterFlip(void)
+{
+    const Uint32 now = ProfCtrGetCycle();
+    const Bool gameplay =
+        (!_bMenu && _pSystem && !_MainLoop_BlackScreen) ? TRUE : FALSE;
+
+    /* AURORA_FCEUMM_FDS_V14_FRAMESKIP_STABILITY_20260827
+     * Menu/prompt/storage frames never retrain gameplay timing. Preserve the
+     * learned gameplay VBlank period, but break the last-flip edge outside
+     * gameplay so closing UI cannot alter the next skip cadence. */
+    if (gameplay)
+    {
+        if (s_SafeFrameskipLastFlip != 0)
+        {
+            const Uint32 delta = now - s_SafeFrameskipLastFlip;
+            _MainLoopSafeFrameskipLearn(delta, TRUE);
+        }
+        s_SafeFrameskipLastFlip = now;
+    }
+    else
+    {
+        s_SafeFrameskipLastFlip = 0;
+    }
+
+    if (s_SafeFrameskipLevel <= 0 || !gameplay)
+        _MainLoopSafeFrameskipResetTiming();
 }
 
 void MainLoopRender()
 {
 	static Uint32 _iFrame=0;
         static int whichdrawbuf = 0;
+
+        /* AURORA_SAFE_FRAMESKIP_PICODRIVE_AUTO_V1: standalone PicoDrive skip path has no
+         * finalize/present/flip/VBlank wait. Core/audio already ran. */
+        if (MainLoopSafeFrameskipConsumePresentationSkip())
+        {
+            if (!_bMenu && _pSystem && !_MainLoop_BlackScreen)
+            {
+                /* AURORA_CD_AUDIO_STREAM_V2_SKIP_AUDIO_CATCHUP_20260829
+                 * The presentation/VBlank wait is already being skipped, so
+                 * spend that recovered host time on at most one EXTRA
+                 * nonblocking async-audio drain. No wait_audio(), no PCM drop.
+                 * With no backlog the second call returns immediately. */
+                Aud_BufferedAsyncStart();
+                Aud_BufferedAsyncStart();
+            }
+            ++_iFrame;
+            return;
+        }
+
+        /* AURORA_SEGA_UI_PRESENTATION_V3
+         *
+         * Keep two different host presentations:
+         *
+         *   UI / browser / prompts -> Aurora's normal 256-wide raster
+         *   plain MD gameplay      -> native 320-wide raster in 240p
+         *   SMS and other systems  -> normal 256-wide raster
+         *
+         * The important distinction from the old late-init path is that
+         * the FIRST MD 320 raster is still selected in mainloop_load.cpp
+         * before PicoDrive is initialised. These later switches happen
+         * only when entering/leaving Aurora's internal UI.
+         *
+         * In 480i/1080i MainLoopEnsureGameplayRasterWidth() does not
+         * rebuild the GS; those modes keep their normal 640 framebuffer.
+         */
+        {
+            Int32 wantedRaster = 256;
+            const Bool bMdVideo =
+                (_pSystem == _pSega &&
+                 PicoDriveBridge_IsMegaDriveVideo()) ? TRUE : FALSE;
+
+            /* AURORA_SEGA_CD_32X_MD_SCALING_V2R1_20260828
+             * Cartridge MD, Sega CD and 32X share H32/H40 presentation. */
+            if (bMdVideo)
+                wantedRaster = 320;
+
+
+            if (_pSystem == _pPce && !_bMenu && !_MainLoop_BlackScreen)
+            {
+                /* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830
+                 * One aligned PCE framebuffer for 256/342/512 dot clocks. */
+                wantedRaster = 512;
+            }
+            /* Menu/prompts use exact 256-source integer presentation on the
+             * still-alive 320 framebuffer, not 256->320 resampling. */
+            GSK_SetUi256On320Framebuffer(
+                (_bMenu && bMdVideo) ? 1 : 0);
+
+            if (_bMenu)
+                GSK_SetNative240pPar(0);
+
+            if (!MainLoopEnsureGameplayRasterWidth(wantedRaster))
+            {
+                printf("[video] warning: could not switch to %d-wide presentation\n",
+                       (int)wantedRaster);
+            }
+
+            /* AURORA_PCE_ROOT512_KRAZY_LATCH_V12_20260830: clear window */
+            if (_pSystem != _pPce || _bMenu || _MainLoop_BlackScreen)
+                GSK_Clear240pVisibleWindow();
+
+            /* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830: clear window */
+            if (_pSystem != _pPce || _bMenu || _MainLoop_BlackScreen)
+                GSK_Clear240pVisibleWindow();
+        }
+
+
+
+        /*
+         * NES/SNES 240p: keep the framebuffer strictly 256x240 (1 source
+         * pixel = 1 framebuffer pixel) and correct horizontal size at
+         * the PCRTC level instead. This avoids uneven pixel widths
+         * caused by scaling 256 pixels into a smaller PolyRect.
+         */
+        static int s_native240pPar = -1;
+        int native240pPar =
+            (g_GskVideoMode == GSK_VIDMODE_240P &&
+             (_pSystem == _pNes ||
+              _pSystem == _pFds || /* AURORA_FCEUMM_FDS_V0_5_RENDER */
+              _pSystem == _pSnes ||
+              _pSystem == _pSnes9x2010 ||
+              (_pSystem == _pSega &&
+               (PicoDriveBridge_IsMegaDriveVideo() ||
+                PicoDriveBridge_IsMasterSystem()))) &&
+             !_bMenu) ? 1 : 0;
+
+        if (native240pPar != s_native240pPar)
+        {
+            GSK_SetNative240pPar(native240pPar);
+            s_native240pPar = native240pPar;
+        }
+
+        /* AURORA_MD_YOFFSET_MINUS9_V1
+         * Plain MD only: effective Y = configured menu Y - 9. */
+        {
+            static int s_lastMdYBias = 9999;
+            int mdYBias = 0;
+
+            if (mdYBias != s_lastMdYBias)
+            {
+                GSK_SetGameplayYOffsetBias(mdYBias);
+                s_lastMdYBias = mdYBias;
+            }
+        }
+
 
 
     /* Re-anchor FRAME_1 to gsKit's current draw buffer before any
@@ -117,6 +489,46 @@ void MainLoopRender()
        to a stale (or, after the SNES blender ran, completely wrong)
        buffer and the visible framebuffer flickered black on every
        other frame. See gskit_backend.h for the longer rationale. */
+    /* AURORA_GS_PARTIAL_GAMEPLAY_CLEAR_V1
+     * Only enable the reduced clear when this frame is guaranteed to draw the
+     * normal game output texture. Menu, boot and black-screen frames retain
+     * the complete physical clear. */
+    /* AURORA_PD_DIRECT_MD_SKIP_CLEAR_V3_RENDER_20260821
+     * DrawDirectGs() for plain MD always emits an opaque backdrop over
+     * the entire transformed 256x240 canvas, which is the entire active
+     * framebuffer in 240p/480i/1080i. Avoid clearing pixels that are
+     * guaranteed to be replaced later in this same frame. */
+    /* AURORA_PD_DIRECT_8BIT_SKIP_CLEAR_V4_20260821 */
+    /* AURORA_PCE_EXPERIMENTAL_V13_NATIVE_PAR_REBUILD
+     *
+     * PCE base geometry is 256x240 with a narrower-than-4:3 presentation.
+     * Use the same native-240p PCRTC technique already used by Aurora's
+     * NES/SNES path: change scanout magnification, NOT framebuffer sampling.
+     * Every one of the 256 source columns is still scanned exactly once.
+     *
+     * Keep menu/black-screen presentation untouched. The loaded system remains
+     * _pPce while Aurora's menu is open, so explicitly turn the PCE-only PAR
+     * correction back off there. GSK_SetNative240pPar internally affects only
+     * the 240p display mode.
+     */
+    if (_pSystem == _pPce)
+    {
+        /* AURORA_PCE_CRT_OVERSCAN_352_V9_20260830
+         * PCE has explicit 256/352/512 PCRTC profiles in gskit_backend.
+         * Do not feed the fixed 512 framebuffer through NES/SNES PAR math. */
+        GSK_SetNative240pPar(0);
+    }
+
+    GSK_SetGameplaySkipClear(
+        (!_bMenu && !_MainLoop_BlackScreen &&
+         (((_pSystem == _pSega) &&
+           PicoDriveBridge_CanDirectGsVideo() &&
+           (PicoDriveBridge_IsMegaDriveVideo() ||
+            g_GskVideoMode == GSK_VIDMODE_240P)) ||
+          ((_pSystem == _pPce) &&
+           PceBridge_CanDirectGsVideo()))) ? TRUE : FALSE);
+    GSK_SetGameplayFastClear(
+        (!_bMenu && _pSystem && !_MainLoop_BlackScreen) ? TRUE : FALSE);
     GSK_ResetFrame();
 
     // render frame
@@ -175,33 +587,114 @@ void MainLoopRender()
 		}
 
 
-        PolyBlend(FALSE);
-        PolyTexture(&_OutTex);
-        PolyUV(0,0,256,240);
-		PolyColor4f(fColor, fColor, fColor, 1.0f);
-
-
-                if (g_GskVideoMode == GSK_VIDMODE_240P && _pSystem == _pNes)
+        /* AURORA_PD_DIRECT_8BIT_GS_V1_20260821 */
+        if (_pSystem == _pNes &&
+            QuicknesBridge_CanDirectGsVideo())
         {
-/*
- * InfoNES 240p overscan compensation.
- *
- * Keep the NES framebuffer at its native 256x240 size and
- * preserve a 1:1 pixel mapping. Only reposition the image
- * to compensate for CRT overscan.
- */
-PolyRect(0.0f, 5.0f, 256.0f, 240.0f);
+            QuicknesBridge_DrawDirectGs(
+                _MainLoop_uOutTexTBP,
+                g_GskVideoMode == GSK_VIDMODE_240P ? 2 : 4,
+                fColor);
+        }
+        else if (_pSystem == _pFds &&
+                 FceummFdsBridge_CanDirectGsVideo())
+        {
+            /* AURORA_FCEUMM_FDS_PERF_DIRECT_T8_V3_20260827: native FCEUmm XBuf -> GS T8 + CLUT. */
+            FceummFdsBridge_DrawDirectGs(
+                _MainLoop_uOutTexTBP,
+                g_GskVideoMode == GSK_VIDMODE_240P ? 2 : 4,
+                fColor);
+        }
+        else if (_pSystem == _pSnes9x2010 &&
+                 Snes9x2010Bridge_CanDirectGsVideo())
+        {
+            Snes9x2010Bridge_DrawDirectGs(
+                _MainLoop_uOutTexTBP, fColor);
+        }
+        else if (_pSystem == _pPce &&
+                 PceBridge_CanDirectGsVideo())
+        {
+            /* AURORA_PCE_EXPERIMENTAL_V10_DIRECT_GS */
+            PceBridge_DrawDirectGs(
+                _MainLoop_uOutTexTBP, fColor);
+        }
+        else if (_pSystem == _pSega &&
+                 PicoDriveBridge_CanDirectGsVideo())
+        {
+            /* AURORA_PD_DIRECT_T8_RENDER */
+            PicoDriveBridge_DrawDirectGs(
+                _MainLoop_uOutTexTBP, fColor);
         }
         else
         {
-PolyRect(0.0f, 7.0f, 256.0f, 240.0f);
+            PolyBlend(FALSE);
+            PolyTexture(&_OutTex);
+            PolyUV(0,0,256,240);
+    		PolyColor4f(fColor, fColor, fColor, 1.0f);
+    
+    
+                    if (g_GskVideoMode == GSK_VIDMODE_240P &&
+                        (_pSystem == _pNes || _pSystem == _pFds)) /* AURORA_FCEUMM_FDS_V0_5_RENDER */
+            {
+    /*
+     * InfoNES 240p overscan compensation.
+     *
+     * Keep the NES framebuffer at its native 256x240 size and
+     * preserve a 1:1 pixel mapping. Only reposition the image
+     * to compensate for CRT overscan.
+     */
+    PolyRect(0.0f, 2.0f, 256.0f, 240.0f);
+            }
+            else if (g_GskVideoMode == GSK_VIDMODE_240P && _pSystem == _pSega)
+            {
+    /* AURORA_SEGA_NATIVE_240P_V1
+     * PicoDriveBridge already composes MD/SMS/GG into an exact 256x240 logical
+     * raster. Present that raster 1:1; PCRTC handles the CRT pixel aspect. */
+    PolyRect(0.0f, 0.0f, 256.0f, 240.0f);
+            }
+            else if (_pSystem == _pSnes || _pSystem == _pSnes9x2010)
+            {
+    PolyRect(0.0f, 8.0f, 256.0f, 240.0f);
+            }
+            else
+            {
+    PolyRect(0.0f, 4.0f, 256.0f, 240.0f);
+            }
+    
+            PolyBlend(TRUE);
         }
 
-        PolyBlend(TRUE);
+        /* AURORA_QN_LIGHTGUN_OVERLAY_V7_20260829
+         * Post-frame overlay: never enters the QuickNES sensor framebuffer. */
+        if (_pSystem == _pNes && QuicknesBridge_LightGunActive())
+            QuicknesBridge_DrawLightGunCursor(
+                g_GskVideoMode == GSK_VIDMODE_240P ? 2 : 4);
+
         //PolyTexture(NULL);
         //PolyRect(dx,dy,128,120);
     }
 
+
+    #if AURORA_RUNTIME_DIAG_OVERLAY
+    /* AURORA_PCE_KRAZY_RUNTIME_DIAG_V11R3_20260830
+     * Hidden diagnostics retained for future PCE/QuickNES investigations. */
+    if (!_bMenu && _pSystem == _pPce)
+    {
+        unsigned vw=0, vh=0, pp=0;
+        int pfb=0, nativeClass=0;
+        int gfb=0, win=0, dw=0, mh=0, sx=0, ovs=0, ws=0;
+
+        PceBridge_GetVideoDebug(&vw, &vh, &pp, &pfb, &nativeClass);
+        GSK_GetPceDebugState(&gfb, &win, &dw, &mh, &sx, &ovs, &ws);
+
+        FontSelect(2);
+        FontColor4f(1.0f, 1.0f, 0.0f, 1.0f);
+        FontPrintf(24, 20, "PCE W%u H%u P%u FB%d N%d", vw, vh, pp, pfb, nativeClass);
+        FontPrintf(24, 32, "GFB%d WIN%d DW%d M%d O%d W%d", gfb, win, dw, mh+1, ovs, ws);
+    }
+    /* AURORA_V6_1G_QN_KRAZY_DEBUG_CONSUMER_CURE_20260831
+     * Retired obsolete QuickNES mapper-79 debug overlay; PCE diagnostics above remain. */
+    #endif /* AURORA_RUNTIME_DIAG_OVERLAY */
 
     if (!_bMenu)
     {	
@@ -285,10 +778,13 @@ PolyRect(0.0f, 7.0f, 256.0f, 240.0f);
 	   message starved audsrv regardless of whether any I/O was happening. */
 	if (_bMenu)
 	{
-		static Bool s_bgmArmed = FALSE;
-		if ((void *)_MainLoop_pScreen == (void *)_MainLoop_pBrowserScreen)
-			s_bgmArmed = TRUE;
-		if (s_bgmArmed)
+		/* AURORA_FINAL_V1_3_NORMAL_MENU_BGM_SESSION_20260901
+		 * _bMenu alone is insufficient: isolated quick-state/device/format
+		 * prompts also pause the core without acquiring the CD transport.
+		 * BGM may scan/open storage, so it is legal only for a session that
+		 * successfully entered through _MenuEnable(TRUE). */
+		if (MainLoopNormalMenuBgmSessionActive() &&
+		    _MainLoop_pScreen != (CScreen *)_MainLoop_pStateConfirmScreen)
 			BgmUpdate();
 		/* Draw the live menu first, then place modal/status text on top. The
 		   previous order painted _MenuDraw after the status and hid it. */
@@ -308,9 +804,10 @@ PolyRect(0.0f, 7.0f, 256.0f, 240.0f);
 		if (_MainLoop_StatusCount > 0)
 		{
 			FontSelect(0);
+			/* AURORA_V15_STATUS_SHADOW_REVERT_20260824
+			 * Revert V15 black double-draw: transient status text is plain cyan again. */
 			FontColor4f(0.0, 0.8f, 0.8f, 1.0f);
 			FontPrintf(20, 200, _MainLoop_StatusStr);
-
 			_MainLoop_StatusCount--;
 		}
 	}
@@ -340,8 +837,15 @@ PolyRect(0.0f, 7.0f, 256.0f, 240.0f);
     if ( (_iFrame&15)==0)   _uVblankCycle = ProfCtrGetCycle();
     GSK_SyncFlip();
     if ( (_iFrame&15)==0)   _uVblankCycle = ProfCtrGetCycle() - _uVblankCycle;
-	MainLoopSafeFrameskipAfterFlip();
+    _MainLoopSafeFrameskipAfterFlip();
     PROF_LEAVE("WaitVBlank");
+
+    /* AURORA_AUDIO_FAILSOFT_POSTVBLANK_V1
+     * The frame is already presented. Keep the normal gameplay audio drain
+     * here so synchronous audsrv RPC latency is moved out of the pre-render
+     * deadline. Aud_BufferedAsyncStart uses only wait=0 drains. */
+    if (!_bMenu && _pSystem && !_MainLoop_BlackScreen)
+        Aud_BufferedAsyncStart();
 
     /* whichdrawbuf is now decorative - gsKit owns the active
        framebuffer index via gsGlobal->ActiveBuffer. Keep it
@@ -351,3 +855,10 @@ PolyRect(0.0f, 7.0f, 256.0f, 240.0f);
 
     _iFrame++;
 }
+
+
+/* AURORA_PCE_KRAZY_RUNTIME_DIAG_V11R3_20260830 */
+
+/* AURORA_PCE_ROOT512_KRAZY_LATCH_V12_20260830 */
+
+/* AURORA_PCE_RELEASE_CLEANUP_FINAL_V15_20260830 */

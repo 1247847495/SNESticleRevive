@@ -14,7 +14,7 @@ void MainLoopModalPrintf(Int32 Time, const Char *pFormat, ...)
 {
 	va_list argptr;
 	va_start(argptr,pFormat);
-	vsprintf(_MainLoop_ModalStr, pFormat, argptr);
+	vsnprintf(_MainLoop_ModalStr, sizeof(_MainLoop_ModalStr), pFormat, argptr);
 	va_end(argptr);
 
 	_MainLoop_ModalCount = Time;
@@ -31,7 +31,7 @@ void MainLoopStatusPrintf(Int32 Time, const Char *pFormat, ...)
 {
 	va_list argptr;
 	va_start(argptr,pFormat);
-	vsprintf(_MainLoop_StatusStr, pFormat, argptr);
+	vsnprintf(_MainLoop_StatusStr, sizeof(_MainLoop_StatusStr), pFormat, argptr);
 	va_end(argptr);
 
 	_MainLoop_StatusCount = Time;
@@ -43,7 +43,7 @@ extern "C" void ScrPrintf(const Char *pFormat, ...)
 	char str[256];
 
 	va_start(argptr,pFormat);
-	vsprintf(str, pFormat, argptr);
+	vsnprintf(str, sizeof(str), pFormat, argptr);
 	va_end(argptr);
 
 //	scr_printf("%s", str);
@@ -64,9 +64,9 @@ extern "C" void ScrPrintf(const Char *pFormat, ...)
  * BootMark(label): marcador de etapa impresso NA HORA -- sobrevive a um
  *   travamento, entao a ultima linha na tela mostra onde o boot parou.
  *
- * Memory card agora e' carregado depois que a tela existe; USB/CDFS sao sob
- * demanda. A lista continua acumulada para que o flush apresente um unico
- * resumo de todos os modulos obrigatorios ao fim do boot. */
+ * Por que acumular: memory card e USB sao carregados em main.cpp ANTES da
+ * tela de log existir; se imprimissem na hora, sumiriam.  Acumula-se tudo
+ * e despeja no flush, quando a tela ja esta pronta. */
 #define BOOT_MAXLOG 32
 static const char *s_BootName[BOOT_MAXLOG];
 static int         s_BootRet [BOOT_MAXLOG];
@@ -88,15 +88,15 @@ extern "C" void BootImportFlush(void)
 	for (i = 0; i < s_BootN; i++)
 	{
 		if (s_BootRet[i] >= 0)
-			ScrPrintf("[IOP] %-11s imported OK", s_BootName[i]);
+			ScrPrintf("[IOP] %-11s 导入成功", s_BootName[i]);
 		else
 		{
-			ScrPrintf("[IOP] %-11s imported BAD (err=%d)",
+			ScrPrintf("[IOP] %-11s 导入失败 (err=%d)",
 			          s_BootName[i], s_BootRet[i]);
 			nfail++;
 		}
 	}
-	ScrPrintf(nfail == 0 ? "[IOP] imported: OK" : "[IOP] imported: BAD");
+	ScrPrintf(nfail == 0 ? "[IOP] 全部模块导入成功" : "[IOP] 模块导入存在失败");
 }
 
 extern "C" void BootMark(const char *pLabel)

@@ -45,10 +45,6 @@ int  MemCardLoadEmbeddedIrx(void);
    this variant does not copy a directory into a fixed 256-entry table, so
    ISO folders of any size remain enumerable. */
 int  CdfsLoadEmbeddedIrx(void);
-/* Query helpers never start a module.  They let boot-time consumers skip
-   optional filesystems until the user explicitly opens that device. */
-int  CdfsIsLoaded(void);
-int  CdfsGetLastError(void);
 
 /* Loads the modern PS2SDK pad stack (padman.irx + mtapman.irx) onto
    the IOP from the buffers embedded in this ELF.  Designed to stack
@@ -73,8 +69,6 @@ int  SmbLoadEmbeddedIrx(void);
 /* USB + BDM fixado: FreeUsbd/usbd_mini + bdm + FatFs + usbmass_bd,
    lendo FAT/exFAT/MBR/GPT e enumerando massN: por drive. */
 int  UsbBdmLoadEmbeddedIrx(void);
-int  UsbBdmIsLoaded(void);
-int  UsbBdmGetLastError(void);
 
 /* HD INTERNO (APA): dev9 + ps2atad + ps2hdd.  Carga PREGUICOSA -- NUNCA
    no boot (a init desses modulos e' sincrona e pode travar consoles sem
@@ -89,6 +83,22 @@ int  UsbBdmGetLastError(void);
 int  HddSupportIsEnabled(void);
 void HddSupportSetEnabled(int enabled);
 int  HddLoadEmbeddedIrx(void);
+int  HddNeedsRestart(void);
+
+/* HD INTERNO (exFAT/FAT via BDM): atad_bd.irx conecta o HD como block
+   device "ata" no BDM residente; o bdmfs_fatfs do boot monta o volume em
+   ata0:/ata1: (FAT16/FAT32/exFAT, UTF-8 LFN, MBR/GPT ou disco inteiro).
+   MUTUAMENTE EXCLUSIVO com o modo APA (hdd0:) -- ambos registram a library
+   atad 1.3 no IOP; ligar um desliga o outro, e trocar de modo com a pilha
+   oposta ja' carregada exige reiniciar (AtaBdNeedsRestart/HddLoadEmbeddedIrx
+   retornam EMBEDDED_IRX_ERROR_RESTART_REQUIRED nesse caso).  Mesma
+   filosofia de carga preguicosa do modo APA: nunca no boot. */
+int  AtaBdSupportIsEnabled(void);
+void AtaBdSupportSetEnabled(int enabled);
+int  AtaBdLoadEmbeddedIrx(void);
+int  AtaBdIsLoaded(void);
+int  AtaBdNeedsRestart(void);
+int  AtaBdGetLastError(void);
 
 /* MMCE (MemCard PRO2 / SD2PSX via mmceman) -> mmce0:/mmce1:.  O driver e'
    carregado sob demanda.  Depois da carga, cada porta e' validada com o
@@ -104,21 +114,12 @@ int  MmceIsLoaded(void);
 int  MmceGetLastError(void);
 int  MmceNeedsRestart(void);
 
-/* Mass (USB): a stack USB sobe no primeiro acesso a mass:/; este flag
-   controla a listagem de mass0:/mass1:. SMB (smb:) e' listado por opcao,
-   mas sua rede e seu driver so' carregam quando o usuario abre o dispositivo.
+/* Mass (USB): a stack USB sempre sobe no boot; este flag controla a
+   listagem de mass0:/mass1:. SMB (smb:) e' listado por opcao, mas sua rede e
+   seu driver so' carregam quando o usuario abre o dispositivo.
    MX4SIO (SD via SIO2) tem toggle PROPRIO (Mx4sioIsEnabled/SetEnabled),
    padrao DESLIGADO -- Mx4sioLoadIfEnabled carrega o mx4sio_bd APOS a
-   config se o toggle estiver ligado (chamado em mainloop_init).
-
-   ATA BDM ASSAULT (HD interno formatado em FAT/exFAT via BDM/massN):
-   tambem tem toggle proprio, padrao DESLIGADO.  Quando ligado, ao abrir
-   qualquer unidade massN: apos a BDM estar rodando, carregamos o
-   usbhdfsd.irx do ATA-Assault, que inicializa o barramento DEV9/ATA e
-   registra o(s) HD(s) interno(s) como massa adicional no mesmo BDM.
-   E' MUTUAMENTE EXCLUSIVO com o modo APA (ps2atad + ps2hdd -> hdd0:),
-   pois os dois modos querem ser donos do hardware ATA ao mesmo tempo.
-   O setters em uiVideo.cpp forcam o outro off quando um e' ligado. */
+   config se o toggle estiver ligado (chamado em mainloop_init). */
 int  MassStorageIsEnabled(void);
 void MassStorageSetEnabled(int enabled);
 int  SmbSupportIsEnabled(void);
@@ -129,11 +130,6 @@ void Mx4sioSetEnabled(int enabled);
 int  Mx4sioIsLoaded(void);
 int  Mx4sioGetLastError(void);
 int  Mx4sioNeedsRestart(void);
-int  AtaBdmAssaultIsEnabled(void);
-void AtaBdmAssaultSetEnabled(int enabled);
-int  AtaBdmAssaultLoadEmbeddedIrx(void);
-int  AtaBdmAssaultIsLoaded(void);
-int  AtaBdmAssaultGetLastError(void);
 
 /* HD interno (APA): traduz "hdd0:/PART/resto" -> "pfs0:/resto" montando a
    particao.  Retorna 2=lista de particoes, 1=traduziu, -1=falha, 0=nao-hdd.
